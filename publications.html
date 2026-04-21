@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Publications — Dr. A. Antony Alosanai Promilton</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500&family=Inter+Tight:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+<header class="topbar no-print">
+  <div class="shell topbar-inner">
+    <a href="index.html" class="brand"><span class="brand-mark">P</span><span class="brand-name">Dr. Promilton <span class="sep">/</span> Field Notebook</span></a>
+    <nav class="nav">
+      <a href="index.html">Home</a>
+      <a href="research.html">Research</a>
+      <a href="publications.html" class="active">Publications</a>
+      <a href="contact.html">Contact</a>
+    </nav>
+  </div>
+</header>
+
+<main class="shell fade-in">
+  <section style="padding:80px 0 20px;">
+    <div class="eyebrow">Vol. I · Chapter 03</div>
+    <h1 class="display" style="margin-top:18px; font-size:clamp(44px,6vw,88px);">Peer-reviewed <span class="accent" style="color:var(--ochre-deep)">Publications.</span></h1>
+    <p style="max-width:720px; font-size:20px; color:var(--ink-2); margin-top:20px;">Twenty-two indexed papers across SCI / Scopus / WoS journals — filter by topic or click through to DOI.</p>
+  </section>
+  <div id="pubs-root"></div>
+</main>
+
+<footer class="footer no-print">
+  <div class="shell"><div class="footer-grid" id="footer-grid"></div>
+    <div class="footer-bottom"><span>© 2026 · Dr. A.A.A. Promilton</span><span>Set in Newsreader, Instrument Serif &amp; IBM Plex Mono</span></div>
+  </div>
+</footer>
+
+<script src="shared.js"></script>
+<script src="components.js"></script>
+<script>Site.renderFooter(); Site.renderPublications();</script>
+</body>
+</html>

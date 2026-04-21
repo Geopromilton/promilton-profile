@@ -1,0 +1,245 @@
+/* ============================================================
+   Field Journal — design system for Dr. Promilton's site
+   Palette: ink navy, warm ochre, bone paper, moss accent
+   Type:    Newsreader (display serif) · Instrument Serif (accent)
+            · IBM Plex Mono (labels)
+   ============================================================ */
+:root {
+  --ink:        #0f2b3c;  /* deep navy ink */
+  --ink-2:      #1b3a4e;
+  --ink-soft:   #3a5060;
+  --paper:      #f6f1e7;  /* bone paper */
+  --paper-2:    #efe7d4;
+  --paper-3:    #e6dcc4;
+  --ochre:      #c47a2b;  /* primary accent */
+  --ochre-deep: #9a5b1b;
+  --moss:       #5e6a3a;  /* secondary accent */
+  --rust:       #a84a2a;
+  --rule:       rgba(15,43,60,0.18);
+  --rule-soft:  rgba(15,43,60,0.10);
+  --shadow:     0 1px 2px rgba(15,43,60,0.06), 0 10px 30px -18px rgba(15,43,60,0.25);
+  --serif:      "Newsreader", "Source Serif 4", Georgia, serif;
+  --accent:     "Instrument Serif", "Newsreader", Georgia, serif;
+  --mono:       "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --sans:       "Inter Tight", -apple-system, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.55;
+  font-feature-settings: "ss01", "kern", "liga";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  background-image:
+    radial-gradient(circle at 18% 14%, rgba(196,122,43,0.05), transparent 42%),
+    radial-gradient(circle at 88% 88%, rgba(94,106,58,0.05), transparent 45%);
+}
+
+a { color: inherit; }
+img { max-width: 100%; display: block; }
+
+/* ---------- Type ---------- */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ochre-deep);
+  font-weight: 500;
+}
+.display {
+  font-family: var(--serif);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+  line-height: 0.98;
+}
+.accent {
+  font-family: var(--accent);
+  font-style: italic;
+  font-weight: 400;
+}
+h1, h2, h3, h4 { font-family: var(--serif); font-weight: 500; letter-spacing: -0.015em; }
+h1 { font-size: clamp(48px, 7vw, 104px); line-height: 0.95; }
+h2 { font-size: clamp(32px, 4.2vw, 56px); line-height: 1.02; margin: 0; }
+h3 { font-size: 22px; margin: 0; }
+small, .mono { font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em; }
+
+/* ---------- Shell ---------- */
+.shell { max-width: 1280px; margin: 0 auto; padding: 0 40px; }
+@media (max-width: 720px){ .shell { padding: 0 20px; } }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  background: rgba(246,241,231,0.86);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--rule);
+}
+.topbar-inner {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 18px 0;
+}
+.brand {
+  display: flex; align-items: baseline; gap: 14px;
+  text-decoration: none; color: var(--ink);
+}
+.brand-mark {
+  width: 28px; height: 28px; display: inline-grid; place-items: center;
+  border: 1px solid var(--ink); border-radius: 50%;
+  font-family: var(--accent); font-style: italic; font-size: 16px;
+  transform: translateY(4px);
+}
+.brand-name { font-family: var(--serif); font-size: 18px; letter-spacing: -0.01em; }
+.brand-name .sep { color: var(--ochre); margin: 0 8px; font-family: var(--mono); font-style: normal; }
+
+.nav { display: flex; gap: 28px; align-items: baseline; }
+.nav a {
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  padding-bottom: 4px;
+  border-bottom: 1px solid transparent;
+  transition: all .2s;
+}
+.nav a:hover { color: var(--ink); }
+.nav a.active { color: var(--ink); border-bottom-color: var(--ochre); }
+
+@media (max-width: 720px){
+  .nav { gap: 16px; }
+  .nav a { font-size: 10px; letter-spacing: 0.08em; }
+}
+
+/* ---------- Footer ---------- */
+.footer {
+  margin-top: 120px;
+  padding: 48px 0 56px;
+  border-top: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+.footer-grid {
+  display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 32px;
+}
+.footer-grid .eyebrow { display: block; margin-bottom: 10px; }
+.footer-grid p, .footer-grid a { font-size: 14px; line-height: 1.6; text-decoration: none; }
+.footer-grid ul { list-style: none; padding: 0; margin: 0; }
+.footer-grid li { padding: 2px 0; }
+.footer-bottom {
+  margin-top: 36px; padding-top: 20px;
+  border-top: 1px solid var(--rule-soft);
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+@media (max-width: 720px){
+  .footer-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 18px;
+  font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  text-decoration: none;
+  border: 1px solid var(--ink);
+  background: var(--ink); color: var(--paper);
+  transition: transform .15s, box-shadow .2s, background .2s;
+}
+.btn:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+.btn.ghost { background: transparent; color: var(--ink); }
+.btn.ghost:hover { background: var(--ink); color: var(--paper); }
+.btn.ochre { background: var(--ochre); border-color: var(--ochre); color: var(--paper); }
+.btn.ochre:hover { background: var(--ochre-deep); border-color: var(--ochre-deep); }
+.btn .arrow { transition: transform .2s; }
+.btn:hover .arrow { transform: translateX(3px); }
+
+/* ---------- Section heading ---------- */
+.sec {
+  padding: 96px 0 0;
+}
+.sec-head {
+  display: grid; grid-template-columns: 160px 1fr; gap: 40px;
+  align-items: baseline;
+  border-top: 1px solid var(--ink);
+  padding-top: 20px;
+  margin-bottom: 40px;
+}
+.sec-num {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+.sec-title { font-size: clamp(28px, 3.4vw, 44px); }
+@media (max-width: 720px){
+  .sec-head { grid-template-columns: 1fr; gap: 12px; padding-top: 14px; }
+  .sec { padding-top: 72px; }
+}
+
+/* ---------- Topo pattern utility ---------- */
+.topo {
+  background-image:
+    repeating-radial-gradient(circle at 30% 30%, transparent 0, transparent 14px, rgba(15,43,60,0.06) 14px, rgba(15,43,60,0.06) 15px),
+    repeating-radial-gradient(circle at 72% 72%, transparent 0, transparent 18px, rgba(196,122,43,0.07) 18px, rgba(196,122,43,0.07) 19px);
+}
+
+/* ---------- Utility grid ---------- */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+@media (max-width: 900px){
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+}
+
+/* ---------- Card ---------- */
+.card {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  padding: 22px 24px;
+}
+.card .eyebrow { display: block; margin-bottom: 8px; }
+
+/* ---------- Print styles ---------- */
+@media print {
+  .topbar, .footer, .no-print { display: none !important; }
+  body { background: white; color: black; font-size: 11pt; }
+  .sec { padding-top: 24pt; page-break-inside: avoid; }
+  h1 { font-size: 28pt; }
+  h2 { font-size: 18pt; }
+  .card { border-color: #ccc; background: white; }
+  a { color: black; text-decoration: none; }
+}
+
+/* ---------- Page transitions (fade in) ---------- */
+.fade-in { animation: fadeIn .6s ease both; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Form ---------- */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+  text-transform: uppercase; color: var(--ink-soft);
+}
+.field input, .field textarea, .field select {
+  font-family: var(--serif); font-size: 16px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 12px 14px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color .2s, box-shadow .2s;
+}
+.field input:focus, .field textarea:focus {
+  border-color: var(--ochre);
+  box-shadow: 0 0 0 3px rgba(196,122,43,0.15);
+}
+.field textarea { min-height: 160px; resize: vertical; }
+
+/* ---------- Hide scrollbar utility (for canvas) ---------- */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
