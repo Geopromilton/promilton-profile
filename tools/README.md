@@ -3,14 +3,55 @@
 Standalone utilities. Not part of the profile site — nothing here is served or linked
 from the HTML pages in the repo root.
 
-## `omniroute-claude-code.sh`
+Two scripts, same job, pick by platform:
+
+| Script | For |
+|---|---|
+| `omniroute-claude-code.ps1` | Native Windows PowerShell (5.1 or 7) |
+| `omniroute-claude-code.sh` | macOS, Linux, WSL, Git Bash |
+
+## `omniroute-claude-code.ps1` (Windows)
+
+```powershell
+.\omniroute-claude-code.ps1 check          # preflight only; changes nothing
+.\omniroute-claude-code.ps1 models free    # list model ids matching "free"
+.\omniroute-claude-code.ps1 setup          # default: auto/best-free
+.\omniroute-claude-code.ps1 verify
+.\omniroute-claude-code.ps1 revert
+```
+
+If the script itself won't start, your execution policy is blocking it:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+It handles two Windows-only traps that have no macOS equivalent:
+
+- **Execution policy.** Under `Restricted` or `AllSigned`, PowerShell profiles never
+  load at all — so an env block would be written and silently ignored. `setup` refuses
+  to write in that state rather than leaving you with config that looks applied.
+- **Two profile files.** Windows PowerShell 5.1 reads
+  `Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`; PowerShell 7 reads
+  `Documents\PowerShell\Microsoft.PowerShell_profile.ps1`. Configure one, run `claude`
+  from the other, and nothing applies. `check` prints both and marks which exist; `setup`
+  writes to the profile of the PowerShell you invoked it from and tells you the other
+  path. Use `-ProfilePath` to target it. Document folders redirected to OneDrive are
+  resolved correctly.
+
+`revert` strips the block from both profiles and clears any persistent user-level
+variables a previous guide may have set with `setx`.
+
+## `omniroute-claude-code.sh` (macOS / Linux / WSL)
 
 Configures the **Claude Code CLI** to route through [OmniRoute](https://www.npmjs.com/package/omniroute),
 a local AI gateway on `localhost:20128` that serves the native Anthropic Messages format
 at `/v1/messages` — the wire protocol Claude Code already speaks, so no translation shim
 is involved.
 
-Run it on the machine where OmniRoute is running.
+Run it on the machine where OmniRoute is running. Under WSL, note that OmniRoute on the
+Windows host is *not* at `localhost:20128` from inside the distro unless mirrored
+networking is on — pass `--url http://<host-ip>:20128`.
 
 ```bash
 ./omniroute-claude-code.sh check          # preflight only; changes nothing
