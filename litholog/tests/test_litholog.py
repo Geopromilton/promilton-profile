@@ -285,9 +285,10 @@ def test_map_and_model_cli(tmp_path):
                  "-o", str(tmp_path / "maps"), "-f", "png"]) == 0
     assert (tmp_path / "maps" / "thickness_4.png").exists()
     assert (tmp_path / "maps" / "thickness_4.asc").exists()
-    assert main(["model", str(f), "--cell", "100", "--sy", "4=0.02", "--only", "4",
-                 "-o", str(tmp_path / "model"), "-f", "png"]) == 0
-    for name in ("block_model.png", "block_model_4.png", "slices.png", "volumes.csv", "model.vtk"):
+    assert main(["model", str(f), "--cell", "100", "--sy", "4=0.02", "--only", "4", "--style", "both",
+                 "--views", "oblique_sw", "top", "-o", str(tmp_path / "model"), "-f", "png"]) == 0
+    for name in ("block_model.png", "block_model_4.png", "slices.png", "volumes.csv", "model.vtk",
+                 "solid_3d.html", "solid_top.png", "solid_4_3d.html"):
         assert (tmp_path / "model" / name).exists()
 
 
