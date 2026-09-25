@@ -173,6 +173,18 @@ def main(argv=None) -> int:
     fr.add_argument("-o", "--out", default="fractures.pdf")
     fr.add_argument("--title")
 
+    cv = sub.add_parser("crossval", help="validate the 3D model: leave-one-out cross-validation, method "
+                                         "comparison, volume range and data support")
+    cv.add_argument("data")
+    cv.add_argument("-u", "--unit", metavar="CODE", help="unit to report in detail, e.g. 4 (default: most common)")
+    cv.add_argument("--methods", nargs="+", choices=["horizons_idw", "horizons_kriging", "voxel", "nearest"])
+    cv.add_argument("--boundary", help="study-area polygon (.shp, .kml, .kmz, .geojson)")
+    cv.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643")
+    cv.add_argument("--no-volumes", action="store_true", help="skip the volume comparison (faster)")
+    cv.add_argument("-o", "--out", default="validation")
+    cv.add_argument("--title")
+    cv.add_argument("-l", "--legend")
+
     sub.add_parser("studio", help="open LithoLog Studio, the desktop application")
 
     ap = sub.add_parser("app", help="open the LithoLog browser app")
@@ -188,7 +200,7 @@ def main(argv=None) -> int:
             "legend": _legend, "convert": _convert, "section": _section, "fence": _fence,
             "map": _map, "model": _model, "app": _app,
             "studio": _studio, "aquifer": _aquifer, "property": _property, "strat": _strat,
-            "chem": _chem, "fractures": _fractures}[a.cmd](a)
+            "chem": _chem, "fractures": _fractures, "crossval": _crossval}[a.cmd](a)
 
 
 def _template(a):
@@ -623,6 +635,36 @@ def _chem(a):
         print(f"Ionic balance outside ±5 %: {', '.join(bad['sample'])}")
     for f in files:
         print(f"  {f}")
+    return 0
+
+
+def _crossval(a):
+    from .io import load_project
+    from .validation import METHODS, validation_report
+
+    project = load_project(a.data, legend=a.legend)
+    boundary = _boundary(a, project)
+    n = len(project.ids)
+    print(f"Cross-validating {n} boreholes (each hidden and predicted from the others) …")
+    r = validation_report(project, a.out, a.methods, boundary, a.unit.upper() if a.unit else None,
+                          a.title or project.name, volumes=not a.no_volumes)
+    s = r["summary"]
+    print("\nDepth logged correctly (mean / worst 10 %):")
+    for _, row in s.iterrows():
+        print(f"  {METHODS[row['method']]:<30} {row['match_mean']:5.1f} %  / {row['match_p10']:5.1f} %")
+    u = r["per_unit"]
+    print("\nOccurrences found at hidden boreholes (detection %, false alarms, top-depth error):")
+    for code, g in u.groupby("code", sort=False):
+        print(f"  {project.legend.get(code).name}")
+        for _, row in g.iterrows():
+            print(f"    {METHODS[row['method']]:<28} {row['detection_pct']:5.0f} %  {int(row['false_alarms']):4d}  "
+                  f"{row['top_mae_m']:5.1f} m")
+    if r["volumes"] is not None:
+        print("\nVolume range across methods (MCM):")
+        for _, row in r["volumes"].iterrows():
+            print(f"  {row['unit']:<40} {row['min_mcm']:>10,.0f} – {row['max_mcm']:>10,.0f}  "
+                  f"({row['spread_pct']:.0f} %)")
+    print(f"\nReport and tables in {a.out}/ (validation.pdf, crossval_*.csv, volumes_by_method.csv)")
     return 0
 
 

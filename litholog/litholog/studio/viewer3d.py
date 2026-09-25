@@ -57,6 +57,9 @@ class Viewer3D(QWidget):
         self.background = "theme"
         self.show_axes_grid = True
         self.look = dict(DEFAULT_LOOK)
+        self._fs = 1.0           # line scale (> 1 while rendering a print-size image)
+        self._ts = 1.0           # text scale
+        self._draws = []         # drawing calls to replay for print-size export
         # Multisample anti-aliasing keeps text sharp (FXAA blurs labels and axis numbers).
         for kind, kw in (("msaa", {"multi_samples": 8}), ("ssaa", {})):
             try:
@@ -108,7 +111,7 @@ class Viewer3D(QWidget):
         """N/E/Up marker with large, sharp labels at a fixed pixel size."""
         p = self.plotter
         fg = self._fg()
-        p.add_axes(interactive=False, line_width=4, color=fg, xlabel="E", ylabel="N", zlabel="Up",
+        p.add_axes(interactive=False, line_width=4 * self._fs, color=fg, xlabel="E", ylabel="N", zlabel="Up",
                    viewport=(0, 0, 0.16, 0.24), shaft_length=0.8, tip_length=0.25, cone_radius=0.5)
         a = getattr(p.renderer, "axes_actor", None)
         if a is None:
@@ -116,7 +119,7 @@ class Viewer3D(QWidget):
         for cap, col in ((a.GetXAxisCaptionActor2D(), "#E0524F"), (a.GetYAxisCaptionActor2D(), "#3FB26B"),
                          (a.GetZAxisCaptionActor2D(), "#4FA3E0")):
             cap.GetTextActor().SetTextScaleModeToNone()
-            render.style_text(cap.GetCaptionTextProperty(), size=17, bold=True, color=fg)
+            render.style_text(cap.GetCaptionTextProperty(), size=17 * self._ts, bold=True, color=fg)
         a.GetXAxisShaftProperty().SetColor(*render.rgb("#E0524F"))
         a.GetXAxisTipProperty().SetColor(*render.rgb("#E0524F"))
         a.GetYAxisShaftProperty().SetColor(*render.rgb("#3FB26B"))
@@ -144,6 +147,10 @@ class Viewer3D(QWidget):
     def show_model(self, model, solids, legend, ve: float, boreholes=True, labels=True, boundary=True,
                    opacity=1.0, cutaway=None):
         """Draw smooth solids, boreholes and boundary. z is exaggerated by ``ve``."""
+        if self._fs == 1.0:
+            self._draws = [("show_model", (model, solids, legend, ve),
+                            dict(boreholes=boreholes, labels=labels, boundary=boundary, opacity=opacity,
+                                 cutaway=cutaway))]
         self.clear()
         self._model = model
         self.ve = ve
@@ -166,7 +173,7 @@ class Viewer3D(QWidget):
             for k, r in enumerate(model.boundary.rings):
                 pts = np.column_stack([r[:, 0], r[:, 1], np.full(len(r), model.z[0] * ve)])
                 line = pv.lines_from_points(np.vstack([pts, pts[:1]]))
-                self.extras[f"boundary{k}"] = p.add_mesh(line, color="#E0524F", line_width=3,
+                self.extras[f"boundary{k}"] = p.add_mesh(line, color="#E0524F", line_width=3 * self._fs,
                                                          name=f"boundary{k}")
         self._grid(model, ve)
         p.reset_camera()
@@ -204,7 +211,7 @@ class Viewer3D(QWidget):
                                            manifold_edges=False)
             if e.n_points == 0:
                 return None
-            return self.plotter.add_mesh(e, color=render.darker(self._unit_color(lt), 0.5), line_width=1.2,
+            return self.plotter.add_mesh(e, color=render.darker(self._unit_color(lt), 0.5), line_width=1.2 * self._fs,
                                          name=f"edge_{key}", pickable=False)
         except Exception:  # noqa: BLE001
             return None
@@ -238,7 +245,7 @@ class Viewer3D(QWidget):
                 t.SetInput(str(bid))
                 t.SetPosition(*xyz)
                 tp = t.GetTextProperty()
-                render.style_text(tp, size=13, bold=True, color=fg)
+                render.style_text(tp, size=13 * self._ts, bold=True, color=fg)
                 tp.SetJustificationToCentered()
                 tp.SetVerticalJustificationToBottom()
                 p.add_actor(t, name=f"bh_label_{k}", reset_camera=False)
@@ -253,26 +260,33 @@ class Viewer3D(QWidget):
         b = p.bounds
         fg = self._fg()
         g = self.extras["grid"] = p.show_grid(
-            color=fg, font_size=12, xtitle="Easting (m)", ytitle="Northing (m)",
+            color=fg, font_size=int(12 * self._ts), xtitle="Easting (m)", ytitle="Northing (m)",
             ztitle=f"Elevation (m), VE {ve:g}x", n_xlabels=5, n_ylabels=5, n_zlabels=5, fmt="%.0f",
             location="outer", ticks="outside", minor_ticks=False,
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
         try:   # sharp 2D text in the bundled font instead of scaled 3D text
             g.SetUseTextActor3D(False)
-            g.SetScreenSize(12)
-            g.SetLabelOffset(8)
+            fs, ts = self._fs, self._ts
+            g.SetScreenSize(12)          # text size comes from the font size alone
+            g.SetLabelOffset(8 * ts)
             try:
-                g.SetTitleOffset((22, 22))   # VTK >= 9.3 takes (x, y)
+                g.SetTitleOffset((22 * ts, 22 * ts))   # VTK >= 9.3 takes (x, y)
             except TypeError:
-                g.SetTitleOffset(22)
+                g.SetTitleOffset(22 * ts)
+            for ax in "XYZ":
+                getattr(g, f"Get{ax}AxesLinesProperty")().SetLineWidth(1.5 * fs)
+                getattr(g, f"Get{ax}AxesGridlinesProperty")().SetLineWidth(fs)
             for i in range(3):
-                render.style_text(g.GetTitleTextProperty(i), size=14, bold=True, color=fg)
-                render.style_text(g.GetLabelTextProperty(i), size=12, color=fg, weight="medium")
+                render.style_text(g.GetTitleTextProperty(i), size=14 * ts, bold=True, color=fg)
+                render.style_text(g.GetLabelTextProperty(i), size=12 * ts, color=fg, weight="medium")
         except Exception:  # noqa: BLE001 - older VTK
             pass
 
     def show_surface(self, model, z, ve, color="#2E86DE", opacity=0.55, name="surface", label=None):
         """A gridded surface (e.g. the water table) in the model's XY grid."""
+        if self._fs == 1.0:
+            self._draws.append(("show_surface", (model, z, ve),
+                                dict(color=color, opacity=opacity, name=name, label=label)))
         X, Y = np.meshgrid(model.x, model.y)
         grid = pv.StructuredGrid(X, Y, np.nan_to_num(z, nan=np.nanmin(z)) * ve)
         grid["valid"] = np.isfinite(z).ravel(order="F").astype(float)
@@ -280,11 +294,14 @@ class Viewer3D(QWidget):
         self.extras[name] = self.plotter.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True,
                                                   name=name, specular=0.4, show_scalar_bar=False)
         if label:
-            t = self.plotter.add_text(label, position="lower_left", font_size=11, color=color, name=f"{name}_label")
+            t = self.plotter.add_text(label, position="lower_left", font_size=int(11 * self._ts), color=color,
+                                      name=f"{name}_label")
             render.style_text(t.GetTextProperty(), color=color)
         self.plotter.render()
 
     def remove(self, name):
+        self._draws = [d for d in self._draws if not (d[0] == "show_terrain" and name == "terrain")
+                       and d[2].get("name") != name]
         self.plotter.remove_actor(name, render=False)
         self.plotter.remove_actor(f"{name}_label", render=False)
         self.extras.pop(name, None)
@@ -292,6 +309,8 @@ class Viewer3D(QWidget):
 
     def show_property(self, pm, ve, lo=None, hi=None, log=None, cmap=None):
         """Voxels of a property model within [lo, hi], coloured by value, with a colour bar."""
+        if self._fs == 1.0:
+            self._draws = [("show_property", (pm, ve), dict(lo=lo, hi=hi, log=log, cmap=cmap))]
         m = pm.model
         self.clear()
         img = pv.ImageData(dimensions=(len(m.x) + 1, len(m.y) + 1, len(m.z) + 1),
@@ -405,6 +424,9 @@ class Viewer3D(QWidget):
 
     def show_terrain(self, dem, model, ve, margin=0.15, n=220, opacity=0.9):
         """The DEM around the model as a shaded, elevation-coloured surface."""
+        if self._fs == 1.0:
+            self._draws = [d for d in self._draws if d[0] != "show_terrain"]
+            self._draws.append(("show_terrain", (dem, model, ve), dict(margin=margin, n=n, opacity=opacity)))
         from ..dem import sample_on_grid
 
         x0, x1, y0, y1 = model.x[0], model.x[-1], model.y[0], model.y[-1]
@@ -440,8 +462,9 @@ class Viewer3D(QWidget):
     def _style_scalar_bars(self):
         for sb in list(getattr(self.plotter, "scalar_bars", {}).values()):
             try:
-                render.style_text(sb.GetTitleTextProperty(), size=13, bold=True, color=self._fg())
-                render.style_text(sb.GetLabelTextProperty(), size=11, color=self._fg(), weight="medium")
+                render.style_text(sb.GetTitleTextProperty(), size=13 * self._ts, bold=True, color=self._fg())
+                render.style_text(sb.GetLabelTextProperty(), size=11 * self._ts, color=self._fg(),
+                                  weight="medium")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -482,25 +505,52 @@ class Viewer3D(QWidget):
             pass
         self.plotter.render()
 
-    def _render_large(self, W: int, transparent=False):
-        """The current scene re-rendered in tiles at about W pixels wide, with fonts and line widths
-        multiplied by the same factor so that the picture keeps its on-screen proportions."""
-        import math
-
+    def _render_large(self, W: int, transparent=False, text_scale=None):
+        """Rebuild the scene in an off-screen window W pixels wide, with fonts and line widths enlarged by
+        the same factor, and render it once: text, labels, axes and lines keep their on-screen proportions
+        and are drawn natively at print resolution (nothing is enlarged afterwards)."""
         src = self.plotter
-        w = max(src.window_size[0], 1)
-        scale = max(1, math.ceil(W / w))
-        props = []
-        coll = src.renderer.GetViewProps()
-        coll.InitTraversal()
-        for _ in range(coll.GetNumberOfItems()):
-            props.append(coll.GetNextProp())
-        a = getattr(src.renderer, "axes_actor", None)
-        if a is not None:
-            props += [a.GetXAxisCaptionActor2D(), a.GetYAxisCaptionActor2D(), a.GetZAxisCaptionActor2D()]
-        with render.ScaledProps(props, scale):
-            arr = src.screenshot(None, scale=scale, return_img=True, transparent_background=transparent)
-        src.render()
+        w, h = src.window_size
+        H = max(1, round(W * h / max(w, 1)))
+        cam = src.camera
+        state = (cam.position, cam.focal_point, cam.up, cam.parallel_projection, cam.parallel_scale,
+                 cam.view_angle)
+        saved = {k: getattr(self, k) for k in ("units", "unit_code", "unit_hz", "edges", "extras", "_model",
+                                               "ve", "_clip_plane")}
+        off = pv.Plotter(off_screen=True, window_size=(W, H))
+        try:
+            if W * H <= 4500 * 3000:
+                off.enable_anti_aliasing("msaa", multi_samples=4)
+        except Exception:  # noqa: BLE001 - at print size aliasing is below one printed dot anyway
+            pass
+        try:
+            self.plotter, self._fs = off, W / max(w, 1)
+            self._ts = text_scale or self._fs
+            self.units, self.unit_code, self.unit_hz, self.edges, self.extras = {}, {}, {}, {}, {}
+            self._clip_plane = None
+            bottom, top = self._bg_colors()
+            off.set_background(bottom, top=top)
+            for name, args, kw in self._draws:
+                getattr(self, name)(*args, **kw)
+            self._orientation_axes()
+            self._apply_visibility(render=False)
+            opac = saved["units"]
+            for key, a in self.units.items():
+                if key in opac:
+                    a.GetProperty().SetOpacity(opac[key].GetProperty().GetOpacity())
+            if self.look.get("ssao"):
+                self.set_ssao(True)
+            c = off.camera
+            c.position, c.focal_point, c.up = state[0], state[1], state[2]
+            c.parallel_projection, c.parallel_scale, c.view_angle = state[3], state[4], state[5]
+            off.renderer.ResetCameraClippingRange()
+            arr = off.screenshot(None, return_img=True, transparent_background=transparent)
+        finally:
+            self.plotter, self._fs, self._ts = src, 1.0, 1.0
+            for k, v in saved.items():
+                setattr(self, k, v)
+            off.close()
+            src.render()
         return arr
 
     def screenshot(self, path, scale: int = 3, transparent=False, legend=True):
@@ -508,7 +558,11 @@ class Viewer3D(QWidget):
         w = self.plotter.window_size[0]
         return self.export_image(path, w * scale, 300, legend=legend, transparent=transparent)
 
-    def export_image(self, path, width_px: int, dpi: int = 1000, legend=True, transparent=False):
+    # on-screen size (px) of the borehole labels; the export text size in points refers to these
+    LABEL_PX = 13
+
+    def export_image(self, path, width_px: int, dpi: int = 1000, legend=True, transparent=False,
+                     text_pt: float | None = None):
         """Print-quality image ``width_px`` wide, tagged with ``dpi`` (e.g. 180 mm at 1000 dpi = 7087 px).
 
         The scene is rendered once more, off screen, at the full output size with fonts and line widths
@@ -518,11 +572,13 @@ class Viewer3D(QWidget):
         from PIL import Image
 
         Image.MAX_IMAGE_PIXELS = None
-        img = Image.fromarray(self._render_large(int(width_px), transparent))
+        # text_pt: printed size of the labels in points (1 pt = 1/72 inch); axis text keeps its proportion
+        ts = (text_pt / 72 * dpi) / self.LABEL_PX if text_pt else None
+        img = Image.fromarray(self._render_large(int(width_px), transparent, ts))
         if legend and self.legend.isVisible() and self.legend.items:
             from PySide6.QtCore import QBuffer, QIODevice
 
-            s = img.width / max(self.legend.width(), 1)
+            s = ts if ts else img.width / max(self.legend.width(), 1)
             q = self.legend.image(img.width, scale=s)
             buf = QBuffer()
             buf.open(QIODevice.WriteOnly)

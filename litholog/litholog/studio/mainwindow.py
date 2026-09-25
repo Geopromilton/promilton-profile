@@ -134,6 +134,9 @@ class MainWindow(QMainWindow):
         r.group(an, "Structure", [
             ("fract", "mdi6.compass-outline", "Fractures", self.show_fractures, False),
         ])
+        r.group(an, "Quality", [
+            ("crossval", "mdi6.check-decagram", "Cross-\nvalidation", self.cross_validation, False),
+        ])
         vw = r.page("View")
         r.group(vw, "Theme", [
             ("th_dark", "mdi6.weather-night", "Dark", lambda: self.set_theme("dark"), True),
@@ -187,13 +190,15 @@ class MainWindow(QMainWindow):
         self.doc_map = FigureDoc("Maps ▸ New map to draw a contour map.")
         self.doc_chem = ChemDoc()
         self.doc_fract = FigureDoc("Analysis ▸ Fractures (needs a Fractures sheet in the data).")
+        self.doc_valid = FigureDoc("Analysis ▸ Cross-validation: how well the model predicts each borehole.")
         for w, name, ic in [(self.viewer, "3D Model", "mdi6.cube-outline"),
                             (self.doc_log, "Strip Log", "mdi6.format-list-text"),
                             (self.doc_sec, "Cross-Section", "mdi6.chart-timeline-variant"),
                             (self.doc_fence, "Fence", "mdi6.fence"),
                             (self.doc_map, "Map", "mdi6.map-outline"),
                             (self.doc_chem, "Chemistry", "mdi6.flask-round-bottom-outline"),
-                            (self.doc_fract, "Fractures", "mdi6.compass-outline")]:
+                            (self.doc_fract, "Fractures", "mdi6.compass-outline"),
+                            (self.doc_valid, "Validation", "mdi6.check-decagram")]:
             self.docs.addTab(w, theme.icon(ic, theme.TEXT_DIM), name)
             self._doc_icons = getattr(self, "_doc_icons", []) + [ic]
         self.setCentralWidget(self.docs)
@@ -993,7 +998,7 @@ class MainWindow(QMainWindow):
         self.ribbon.refresh_icons()
         for k, ic in enumerate(getattr(self, "_doc_icons", [])):
             self.docs.setTabIcon(k, theme.icon(ic, theme.TEXT_DIM))
-        for d in (self.doc_log, self.doc_sec, self.doc_fence, self.doc_map, self.doc_fract):
+        for d in (self.doc_log, self.doc_sec, self.doc_fence, self.doc_map, self.doc_fract, self.doc_valid):
             d.apply_theme()
         self.build_btn.setIcon(theme.icon("mdi6.cube-outline", theme.ON_ACCENT))
         self.viewer.apply_theme()
@@ -1284,6 +1289,49 @@ class MainWindow(QMainWindow):
         self.doc_fract.set_figure(fig)
         self.docs.setCurrentWidget(self.doc_fract)
 
+    def cross_validation(self):
+        if not self.need_project():
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Folder for the validation report and tables")
+        if not folder:
+            return
+        from PySide6.QtWidgets import QInputDialog
+
+        from ..validation import METHODS, validation_report
+
+        codes = list(dict.fromkeys(c for c in self.project.lithology["code"] if c))
+        names = [f"{self.project.legend.get(c).name} ({c})" for c in codes]
+        pick, ok = QInputDialog.getItem(self, "Cross-validation", "Unit to report in detail:", names, 0, False)
+        if not ok:
+            return
+        unit = codes[names.index(pick)]
+        b = self.boundary if self.p_clipb.isChecked() else None
+
+        def done(r):
+            import matplotlib.pyplot as plt
+
+            fig = plt.imread(str(Path(folder) / "validation.png"))
+            from matplotlib.figure import Figure
+
+            f = Figure(figsize=(420 / 25.4, 297 / 25.4))
+            ax = f.add_axes([0, 0, 1, 1])
+            ax.imshow(fig)
+            ax.set_axis_off()
+            self.doc_valid.set_figure(f)
+            self.docs.setCurrentWidget(self.doc_valid)
+            self.log(f"Cross-validation of {r['per_hole']['borehole_id'].nunique()} boreholes — depth logged "
+                     "correctly (mean):")
+            for _, row in r["summary"].iterrows():
+                self.log(f"  {METHODS[row['method']]}: {row['match_mean']:.0f} %")
+            u = r["per_unit"][r["per_unit"]["code"] == unit]
+            for _, row in u.iterrows():
+                self.log(f"  {self.project.legend.get(unit).name} · {METHODS[row['method']]}: "
+                         f"{row['detection_pct']:.0f} % found, top depth ±{row['top_mae_m']:.1f} m")
+            self.log(f"Report and tables saved in {folder}")
+
+        self.run("Cross-validating (each borehole hidden and predicted from the others)", validation_report, done,
+                 self.project, folder, None, b, unit, self._title())
+
     # ------------------------------------------------------------------ export
     def save_image(self):
         w = self.docs.currentWidget()
@@ -1295,7 +1343,7 @@ class MainWindow(QMainWindow):
         dlg = ExportImageDialog(is3d, page_mm, self)
         if dlg.exec() != QDialog.Accepted:
             return
-        width_mm, dpi, ext = dlg.values()
+        width_mm, dpi, ext, text_pt = dlg.values()
         path, _ = QFileDialog.getSaveFileName(self, "Save image", f"litholog.{ext}",
                                               "PNG (*.png);;TIFF (*.tif);;JPEG (*.jpg)")
         if not path:
@@ -1304,7 +1352,21 @@ class MainWindow(QMainWindow):
 
         def work():
             if is3d:
-                return self.viewer.export_image(path, px, dpi)
+                return self.viewer.export_image(path, px, dpi, text_pt=text_pt)
+            if text_pt:   # 2D pages: scale all text so the base size prints at text_pt
+                import matplotlib as mpl
+
+                old = {}
+                for t in w.figure.findobj(lambda o: hasattr(o, "get_fontsize") and hasattr(o, "set_fontsize")):
+                    old[t] = t.get_fontsize()
+                    t.set_fontsize(old[t] * text_pt / mpl.rcParams["font.size"])
+                try:
+                    w.figure.savefig(path, dpi=dpi, **({"pil_kwargs": {"compression": "tiff_lzw"}}
+                                                       if path.lower().endswith((".tif", ".tiff")) else {}))
+                finally:
+                    for t, fsz in old.items():
+                        t.set_fontsize(fsz)
+                return path
             from PIL import Image
 
             Image.MAX_IMAGE_PIXELS = None
@@ -1689,6 +1751,11 @@ class ExportImageDialog(QDialog):
         for d in (300, 600, 1000, 1200):
             self.dpi.addItem(f"{d} dpi", d)
         self.dpi.setCurrentIndex(2)
+        self.text = QDoubleSpinBox(minimum=0, maximum=72, decimals=1, singleStep=0.5, suffix=" pt",
+                                   specialValueText="Auto (as on screen)")
+        self.text.setValue(8 if is3d else 0)
+        self.text.setToolTip("Printed size of labels and axis text (1 pt = 1/72 inch). 7–9 pt suits journal "
+                             "figures; Auto keeps the on-screen proportions.")
         self.fmt = QComboBox()
         for label, ext in (("PNG (lossless)", "png"), ("TIFF (LZW, for print)", "tif"), ("JPEG", "jpg")):
             self.fmt.addItem(label, ext)
@@ -1698,6 +1765,7 @@ class ExportImageDialog(QDialog):
         f.addRow("Size", self.size)
         f.addRow("Width", self.width)
         f.addRow("Resolution", self.dpi)
+        f.addRow("Text size", self.text)
         f.addRow("Format", self.fmt)
         f.addRow(self.info)
         if is3d:
@@ -1719,4 +1787,4 @@ class ExportImageDialog(QDialog):
         self.info.setText(f"{px:,.0f} pixels wide")
 
     def values(self):
-        return self.width.value(), self.dpi.currentData(), self.fmt.currentData()
+        return self.width.value(), self.dpi.currentData(), self.fmt.currentData(), self.text.value() or None

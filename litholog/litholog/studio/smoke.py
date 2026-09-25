@@ -99,6 +99,12 @@ def check(report_path: str) -> int:
         m = build_horizon_model(state["p"])
         assert len(horizon_volumes(m)) and build_solids(m, cutaway="sw")
 
+    def validation():
+        from ..validation import validation_report
+
+        r = validation_report(state["p"], out / "cv", methods=("horizons_idw", "nearest"), volumes=False)
+        assert len(r["summary"]) == 2
+
     def dem_and_boundaries():
         import json
 
@@ -156,7 +162,7 @@ def check(report_path: str) -> int:
 
     for name, fn in [("load demo", load), ("strip log PDF", logs), ("cross-section PDF", section),
                      ("kriged map PDF", maps), ("3D model + smooth solids", model),
-                     ("horizon model + solids", horizons), ("DEM, KML, GeoJSON", dem_and_boundaries),
+                     ("horizon model + solids", horizons), ("DEM, KML, GeoJSON", dem_and_boundaries), ("cross-validation report", validation),
                      ("aquifer, property, strat, fractures, chemistry", analysis),
                      ("GUI libraries (Qt, VTK, icons)", gui_imports), ("reprojection (PROJ data)", reproject)]:
         step(name, fn)

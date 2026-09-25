@@ -219,6 +219,24 @@ A ribbon interface with project tree, properties and message panels; everything 
   bar, axes grid, DEM terrain.
 * Projects (`.llproj`) keep data, legend, boundary, DEM and all settings.
 
+## Model validation (cross-validation)
+
+```bash
+litholog crossval data.xlsx --unit 4 --boundary study_area.kmz -o validation
+```
+
+Every borehole is hidden in turn and its log predicted from the others (leave-one-out
+cross-validation). The report (`validation.pdf`, CSV tables) gives, for each method — horizons with
+IDW or kriging, voxel, and the nearest-borehole baseline that any model must beat:
+
+* the share of drilled depth predicted correctly, on average and at the worst 10 % of holes;
+* for each unit: occurrences found at the hidden borehole, false alarms, error in the depth of the
+  top and in the total thickness;
+* a map of accuracy at every borehole, and a map of distance to the nearest borehole (data support);
+* the volume of each unit from every method, as a practical uncertainty range.
+
+In LithoLog Studio: Analysis ▸ Cross-validation.
+
 ## Groundwater, properties, layers, chemistry and fractures
 
 ```bash
@@ -298,6 +316,8 @@ save_striplog(bh, project.legend, "BW-01.pdf")
       stratigraphy, hydrochemistry, fractures, log sections
 - [x] **M6** Horizon-based modelling (continuous thin layers), DEM ground surface and terrain,
       KML/KMZ/GeoJSON boundaries, layer properties, editable legend bar, dark/light themes, logo
+- [x] **M7** Inter typeface, sharper 3D text, per-horizon visibility, textures, print export with
+      chosen DPI and text size, leave-one-out cross-validation report
 - [ ] Next: KMZ/DXF export, faults, database connection
 
 ## Development

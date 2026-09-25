@@ -150,12 +150,18 @@ class ScaledProps:
     def __enter__(self):
         f = self.f
         for prop in self.props:
-            for t in _text_props(prop):
+            # vtkWindowToImageFilter already magnifies 2D overlays (axes grid, captions, scalar bars);
+            # only 3D-anchored text (billboards) and line widths need scaling here.
+            # measured: billboard labels and the axes grid need the full factor, while the N/E/Up
+            # captions are magnified by the tiling itself and must be shrunk back
+            tf = f if prop.IsA("vtkBillboardTextActor3D") or prop.IsA("vtkCubeAxesActor") else \
+                (1 / f if prop.IsA("vtkCaptionActor2D") else None)
+            for t in (_text_props(prop) if tf else []):
                 s = t.GetFontSize()
-                t.SetFontSize(max(1, round(s * f)))
+                t.SetFontSize(max(1, round(s * tf)))
                 self.undo.append(lambda t=t, s=s: t.SetFontSize(s))
             if prop.IsA("vtkCubeAxesActor"):
-                for name in ("ScreenSize", "LabelOffset", "TitleOffset"):
+                for name in ():
                     get, set_ = getattr(prop, "Get" + name, None), getattr(prop, "Set" + name, None)
                     if get and set_:
                         v0 = get()

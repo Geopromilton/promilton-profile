@@ -636,3 +636,37 @@ def test_cli_model_horizons_with_dem(tmp_path):
                  "--views", "top", "--style", "smooth", "-o", str(out)]) == 0
     hv = pd.read_csv(out / "horizons.csv")
     assert (hv[hv["code"] == 4]["holes_present"] == 16).all()
+
+
+def test_crossval_scoring_and_report(tmp_path):
+    from litholog.validation import score, validation_report
+
+    actual = [(0, 3, "1"), (3, 10, "3"), (10, 13, "4"), (13, 30, "3")]
+    same = score(actual, actual, ["1", "3", "4"])
+    assert same[0]["match_pct"] == 100 and all(u["detected"] == u["occurrences"] for u in same[1])
+    shifted = score(actual, [(0, 3, "1"), (3, 12, "3"), (12, 15, "4"), (15, 30, "3")], ["4"])
+    u4 = shifted[1][0]
+    assert u4["detected"] == 1 and abs(u4["top_error_m"] - 2) < 1e-9 and 80 < shifted[0]["match_pct"] < 90
+    missed = score(actual, [(0, 3, "1"), (3, 30, "3")], ["4"])[1][0]
+    assert missed["detected"] == 0 and missed["false_alarms"] == 0
+
+    # fracture zones whose depth changes smoothly across the site (spatially continuous, as the
+    # horizon method assumes); random, uncorrelated depths would be unpredictable by any method
+    rows = ["Name\tX\tY\tZ\tMaterial"]
+    rng = np.random.default_rng(3)
+    for k in range(16):
+        x, y = rng.uniform(0, 3000, 2)
+        g, d1, d2 = 120 + x / 200, 20 + x / 300, 55 + y / 250
+        tops = [(0, "1"), (3, "2"), (10, "3"), (d1, "4"), (d1 + 3, "3"), (d2, "4"), (d2 + 3, "3"), (100, "3")]
+        rows += [f"B{k}\t{x:.1f}\t{y:.1f}\t{g - d:.2f}\t{m}" for d, m in tops]
+    (tmp_path / "smooth.txt").write_text("\n".join(rows) + "\n")
+    proj = load_project(tmp_path / "smooth.txt")
+    r = validation_report(proj, tmp_path / "cv", methods=("horizons_idw", "voxel", "nearest"), target="4",
+                          volumes=False)
+    s = r["summary"].set_index("method")
+    assert set(s.index) == {"horizons_idw", "voxel", "nearest"} and (s["holes"] == 16).all()
+    u = r["per_unit"].set_index(["method", "code"])
+    # continuous fracture zones: the horizon model finds them at hidden boreholes, the voxel vote does not
+    assert u.loc[("horizons_idw", "4"), "detection_pct"] > u.loc[("voxel", "4"), "detection_pct"]
+    assert u.loc[("horizons_idw", "4"), "detection_pct"] >= 90
+    assert (tmp_path / "cv" / "validation.pdf").exists()
