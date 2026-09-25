@@ -6,7 +6,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 ROOT = Path(SPECPATH).parent
-datas = [(str(ROOT / "litholog" / "data"), "litholog/data")]
+datas = [(str(ROOT / "litholog" / "data"), "litholog/data"), (str(ROOT / "litholog" / "fonts"), "litholog/fonts")]
 datas += collect_data_files("qtawesome")          # icon fonts
 datas += collect_data_files("pyvista")
 datas += collect_data_files("pyproj")             # PROJ database for reprojection

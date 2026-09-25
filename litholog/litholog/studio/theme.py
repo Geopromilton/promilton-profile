@@ -32,7 +32,7 @@ set_mode("dark")
 
 def qss() -> str:
     return f"""
-* {{ font-family: 'Segoe UI', 'Inter', 'DejaVu Sans', sans-serif; font-size: 10pt; color: {TEXT}; }}
+* {{ font-family: 'Inter', 'Segoe UI', 'DejaVu Sans', sans-serif; font-size: 9.5pt; color: {TEXT}; }}
 QMainWindow, QWidget {{ background: {BG}; }}
 QToolTip {{ background: {PANEL_2}; color: {TEXT}; border: 1px solid {BORDER}; padding: 4px; }}
 
@@ -106,6 +106,9 @@ QSplitter::handle {{ background: {BORDER}; }}
 def apply(app, mode: str | None = None):
     if mode:
         set_mode(mode)
+    from ..typeface import use_in_qt
+
+    use_in_qt(app)
     app.setStyle("Fusion")
     pal = QPalette()
     for role, col in [

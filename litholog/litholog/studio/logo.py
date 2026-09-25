@@ -53,9 +53,9 @@ def wordmark_svg(dark: bool = True) -> str:
     mark = svg(256, background=True).split("\n", 1)[1].rsplit("</svg>", 1)[0]
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="820" height="200" viewBox="0 0 820 200">
 <g transform="translate(10,10) scale(0.703)">{mark}</g>
-<text x="210" y="112" font-family="Segoe UI, Inter, DejaVu Sans, sans-serif" font-size="78" font-weight="700"
+<text x="210" y="112" font-family="Inter, Segoe UI, DejaVu Sans, sans-serif" font-size="78" font-weight="700"
  fill="{text}">Litho<tspan fill="#F0A43A">Log</tspan></text>
-<text x="214" y="156" font-family="Segoe UI, Inter, DejaVu Sans, sans-serif" font-size="21" letter-spacing="2.5"
+<text x="214" y="156" font-family="Inter, Segoe UI, DejaVu Sans, sans-serif" font-size="21" letter-spacing="2.5"
  fill="{dim}">GEOLOGY · HYDROGEOLOGY · 3D MODELS</text>
 </svg>"""
 

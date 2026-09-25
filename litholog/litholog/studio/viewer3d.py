@@ -8,7 +8,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 from pyvistaqt import QtInteractor
 
-from . import theme
+from . import render, theme
 from .legendbar import LegendBar
 
 BACKGROUNDS = {  # name -> (bottom, top) or a single colour; "theme" follows the UI theme
@@ -30,10 +30,15 @@ VIEW_DIRS = {  # camera direction (from focal point towards the camera), view-up
 }
 
 
-def solid_to_mesh(solid) -> pv.PolyData:
+def solid_to_mesh(solid, split: bool = False) -> pv.PolyData:
+    """Triangle mesh of a solid; ``split`` keeps sharp edges (tops vs. walls) crisp."""
     faces = np.hstack([np.full((len(solid.faces), 1), 3, np.int64), solid.faces.astype(np.int64)]).ravel()
     mesh = pv.PolyData(solid.verts.astype(np.float64), faces)
-    return mesh.compute_normals(split_vertices=False, auto_orient_normals=True)
+    return mesh.compute_normals(split_vertices=split, feature_angle=45, auto_orient_normals=True)
+
+
+# Display options (View ▸ Rendering)
+DEFAULT_LOOK = {"texture": "grain", "vivid": True, "edges": True, "ssao": False}
 
 
 class Viewer3D(QWidget):
@@ -51,12 +56,21 @@ class Viewer3D(QWidget):
         p = self.plotter
         self.background = "theme"
         self.show_axes_grid = True
-        try:
-            p.enable_anti_aliasing("fxaa")
-        except Exception:  # noqa: BLE001 - older/limited GL: carry on without AA
-            pass
+        self.look = dict(DEFAULT_LOOK)
+        # Multisample anti-aliasing keeps text sharp (FXAA blurs labels and axis numbers).
+        for kind, kw in (("msaa", {"multi_samples": 8}), ("ssaa", {})):
+            try:
+                p.enable_anti_aliasing(kind, **kw)
+                break
+            except Exception:  # noqa: BLE001 - limited GL: try the next / carry on without AA
+                continue
         self.apply_theme(render=False)
-        self.units = {}          # code -> actor
+        self.units = {}          # key (code, or code#horizon) -> actor
+        self.unit_code = {}      # key -> lithology code
+        self.unit_hz = {}        # key -> horizon index (None for merged solids)
+        self.edges = {}          # key -> contact-line actor
+        self.code_vis = {}       # code -> visible
+        self.hz_vis = {}         # horizon index -> visible
         self.extras = {}         # name -> actor (boreholes, labels, boundary, grid)
         self.ve = 1.0
         self._clip_plane = None
@@ -85,10 +99,30 @@ class Viewer3D(QWidget):
             p.hide_axes()
         except Exception:  # noqa: BLE001
             pass
-        p.add_axes(interactive=False, line_width=2, color=self._fg(), xlabel="E", ylabel="N", zlabel="Up")
+        self._orientation_axes()
         self.legend.update()
         if render:
             p.render()
+
+    def _orientation_axes(self):
+        """N/E/Up marker with large, sharp labels at a fixed pixel size."""
+        p = self.plotter
+        fg = self._fg()
+        p.add_axes(interactive=False, line_width=4, color=fg, xlabel="E", ylabel="N", zlabel="Up",
+                   viewport=(0, 0, 0.16, 0.24), shaft_length=0.8, tip_length=0.25, cone_radius=0.5)
+        a = getattr(p.renderer, "axes_actor", None)
+        if a is None:
+            return
+        for cap, col in ((a.GetXAxisCaptionActor2D(), "#E0524F"), (a.GetYAxisCaptionActor2D(), "#3FB26B"),
+                         (a.GetZAxisCaptionActor2D(), "#4FA3E0")):
+            cap.GetTextActor().SetTextScaleModeToNone()
+            render.style_text(cap.GetCaptionTextProperty(), size=17, bold=True, color=fg)
+        a.GetXAxisShaftProperty().SetColor(*render.rgb("#E0524F"))
+        a.GetXAxisTipProperty().SetColor(*render.rgb("#E0524F"))
+        a.GetYAxisShaftProperty().SetColor(*render.rgb("#3FB26B"))
+        a.GetYAxisTipProperty().SetColor(*render.rgb("#3FB26B"))
+        a.GetZAxisShaftProperty().SetColor(*render.rgb("#4FA3E0"))
+        a.GetZAxisTipProperty().SetColor(*render.rgb("#4FA3E0"))
 
     def set_background(self, name):
         self.background = name
@@ -96,15 +130,16 @@ class Viewer3D(QWidget):
 
     # ------------------------------------------------------------------
     def _welcome(self):
-        self.plotter.add_text("LithoLog Studio\nOpen borehole data to begin  (Home ▸ Open)",
-                              position="upper_left", font_size=11, color=self._fg(), name="welcome")
+        t = self.plotter.add_text("LithoLog Studio\nOpen borehole data to begin  (Home ▸ Open)",
+                                  position="upper_left", font_size=12, color=self._fg(), name="welcome")
+        render.style_text(t.GetTextProperty(), color=self._fg())
         self.plotter.render()
 
     def clear(self):
         self.disable_clip()
         self.plotter.clear_actors()
-        self.units.clear()
-        self.extras.clear()
+        for d in (self.units, self.extras, self.unit_code, self.unit_hz, self.edges):
+            d.clear()
 
     def show_model(self, model, solids, legend, ve: float, boreholes=True, labels=True, boundary=True,
                    opacity=1.0, cutaway=None):
@@ -113,13 +148,18 @@ class Viewer3D(QWidget):
         self._model = model
         self.ve = ve
         p = self.plotter
+        self._legend = legend
+        span = max(model.x[-1] - model.x[0], model.y[-1] - model.y[0]) or 1.0
         for s in solids:
-            mesh = solid_to_mesh(s)
+            key = s.code if s.horizon is None else f"{s.code}#{s.horizon}"
+            mesh = solid_to_mesh(s, split=True)
             mesh.points[:, 2] *= ve
-            lt = legend.get(s.code)
-            self.units[s.code] = p.add_mesh(
-                mesh, color=lt.color, smooth_shading=True, opacity=opacity, name=f"unit_{s.code}",
-                ambient=0.28, diffuse=0.78, specular=0.18, specular_power=18, show_scalar_bar=False)
+            self.units[key] = self._add_solid(mesh, key, s, legend.get(s.code), opacity, span)
+            self.unit_code[key] = s.code
+            self.unit_hz[key] = s.horizon
+            if self.look.get("edges"):
+                self.edges[key] = self._add_contacts(mesh, key, legend.get(s.code))
+        self._apply_visibility(render=False)
         if boreholes and model.holes:
             self._add_boreholes(model, legend, ve, labels, cutaway)
         if boundary and model.boundary is not None:
@@ -131,6 +171,43 @@ class Viewer3D(QWidget):
         self._grid(model, ve)
         p.reset_camera()
         self.set_view("iso_sw")
+
+    def _unit_color(self, lt):
+        return render.enhance(lt.color) if self.look.get("vivid") else lt.color
+
+    def _add_solid(self, mesh, key, solid, lt, opacity, span):
+        color = self._unit_color(lt)
+        kw = dict(smooth_shading=True, opacity=opacity, name=f"unit_{key}", show_scalar_bar=False,
+                  ambient=0.22, diffuse=0.85, specular=0.28, specular_power=28)
+        tex_kind = self.look.get("texture", "none")
+        if tex_kind in ("grain", "pattern"):
+            try:
+                seed = sum(map(ord, solid.code)) + 31 * (solid.horizon or 0)
+                img = (render.grain_texture(color, seed) if tex_kind == "grain"
+                       else render.pattern_texture(lt.code, lt.name, color, lt.pattern))
+                tile = span / (10 if tex_kind == "grain" else 26)
+                mesh.active_texture_coordinates = render.triplanar_tcoords(
+                    np.asarray(mesh.points), np.asarray(mesh.point_normals), tile, tile / 3)
+                tex = pv.Texture(img)
+                tex.repeat = True
+                tex.interpolate = True
+                tex.mipmap = True
+                return self.plotter.add_mesh(mesh, texture=tex, **kw)
+            except Exception as e:  # noqa: BLE001 - fall back to plain colour
+                self.message.emit(f"Texture not available ({e}); using plain colour.")
+        return self.plotter.add_mesh(mesh, color=color, **kw)
+
+    def _add_contacts(self, mesh, key, lt):
+        """Thin dark lines along the layer edges and contacts (like a drawn geological model)."""
+        try:
+            e = mesh.extract_feature_edges(feature_angle=35, boundary_edges=True, non_manifold_edges=False,
+                                           manifold_edges=False)
+            if e.n_points == 0:
+                return None
+            return self.plotter.add_mesh(e, color=render.darker(self._unit_color(lt), 0.5), line_width=1.2,
+                                         name=f"edge_{key}", pickable=False)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _add_boreholes(self, model, legend, ve, labels, cutaway):
         p = self.plotter
@@ -153,9 +230,19 @@ class Viewer3D(QWidget):
         for k, (seg, col) in enumerate(zip(blocks, colors)):
             p.add_mesh(seg, color=col, smooth_shading=True, name=f"bh_{k}", ambient=0.3, specular=0.3)
         if labels and tops:
-            self.extras["labels"] = p.add_point_labels(
-                np.array([t[1] for t in tops]), [t[0] for t in tops], font_size=11, text_color=self._fg(),
-                shape=None, show_points=False, always_visible=True, name="bh_labels", bold=True)
+            import vtk
+
+            fg = self._fg()
+            for k, (bid, xyz) in enumerate(tops):
+                t = vtk.vtkBillboardTextActor3D()   # 3D-anchored, screen-facing, sharp at any export size
+                t.SetInput(str(bid))
+                t.SetPosition(*xyz)
+                tp = t.GetTextProperty()
+                render.style_text(tp, size=13, bold=True, color=fg)
+                tp.SetJustificationToCentered()
+                tp.SetVerticalJustificationToBottom()
+                p.add_actor(t, name=f"bh_label_{k}", reset_camera=False)
+            self.extras["labels"] = True
 
     def _grid(self, model, ve):
         """Bounding grid with true coordinates (the geometry's z is exaggerated by ``ve``)."""
@@ -164,11 +251,25 @@ class Viewer3D(QWidget):
             p.remove_bounds_axes()
             return
         b = p.bounds
-        self.extras["grid"] = p.show_grid(
-            color=self._fg(), font_size=9, xtitle="Easting (m)", ytitle="Northing (m)",
-            ztitle=f"Elevation (m)   VE ×{ve:g}", n_xlabels=5, n_ylabels=5, n_zlabels=5, fmt="%.0f",
+        fg = self._fg()
+        g = self.extras["grid"] = p.show_grid(
+            color=fg, font_size=12, xtitle="Easting (m)", ytitle="Northing (m)",
+            ztitle=f"Elevation (m), VE {ve:g}x", n_xlabels=5, n_ylabels=5, n_zlabels=5, fmt="%.0f",
             location="outer", ticks="outside", minor_ticks=False,
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
+        try:   # sharp 2D text in the bundled font instead of scaled 3D text
+            g.SetUseTextActor3D(False)
+            g.SetScreenSize(12)
+            g.SetLabelOffset(8)
+            try:
+                g.SetTitleOffset((22, 22))   # VTK >= 9.3 takes (x, y)
+            except TypeError:
+                g.SetTitleOffset(22)
+            for i in range(3):
+                render.style_text(g.GetTitleTextProperty(i), size=14, bold=True, color=fg)
+                render.style_text(g.GetLabelTextProperty(i), size=12, color=fg, weight="medium")
+        except Exception:  # noqa: BLE001 - older VTK
+            pass
 
     def show_surface(self, model, z, ve, color="#2E86DE", opacity=0.55, name="surface", label=None):
         """A gridded surface (e.g. the water table) in the model's XY grid."""
@@ -179,7 +280,8 @@ class Viewer3D(QWidget):
         self.extras[name] = self.plotter.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True,
                                                   name=name, specular=0.4, show_scalar_bar=False)
         if label:
-            self.plotter.add_text(label, position="lower_left", font_size=9, color=color, name=f"{name}_label")
+            t = self.plotter.add_text(label, position="lower_left", font_size=11, color=color, name=f"{name}_label")
+            render.style_text(t.GetTextProperty(), color=color)
         self.plotter.render()
 
     def remove(self, name):
@@ -209,6 +311,7 @@ class Viewer3D(QWidget):
             clim=[finite.min(), finite.max()], smooth_shading=False, name="property", show_edges=False,
             scalar_bar_args=dict(title=title, color=theme.TEXT, vertical=True, position_x=0.88,
                                  position_y=0.2, height=0.6, title_font_size=12, label_font_size=10))
+        self._style_scalar_bars()
         self._model = m
         self.ve = ve
         if m.holes:
@@ -244,27 +347,55 @@ class Viewer3D(QWidget):
             p.camera.zoom(1.15)
         p.render()
 
-    def set_unit_visible(self, code, visible: bool):
-        a = self.units.get(code)
-        if a is not None:
-            a.SetVisibility(bool(visible))
+    def _apply_visibility(self, render=True):
+        for key, a in self.units.items():
+            code, hz = self.unit_code.get(key, key), self.unit_hz.get(key)
+            vis = self.code_vis.get(code, True) and (hz is None or self.hz_vis.get(hz, True))
+            a.SetVisibility(bool(vis))
+            e = self.edges.get(key)
+            if e is not None:
+                e.SetVisibility(bool(vis))
+        if render:
             self.plotter.render()
+
+    def set_unit_visible(self, code, visible: bool):
+        """Show/hide a lithology (all its horizons)."""
+        self.code_vis[code] = bool(visible)
+        self._apply_visibility()
+
+    def set_horizon_visible(self, k: int, visible: bool):
+        self.hz_vis[int(k)] = bool(visible)
+        self._apply_visibility()
 
     def set_opacity(self, value: float, per_unit=None):
         """Overall opacity; ``per_unit`` {code: factor} from the layer properties."""
         per_unit = per_unit or {}
-        for code, a in self.units.items():
-            a.GetProperty().SetOpacity(value * per_unit.get(code, 1.0))
+        for key, a in self.units.items():
+            a.GetProperty().SetOpacity(value * per_unit.get(self.unit_code.get(key, key), 1.0))
         self.plotter.render()
 
     def set_unit_color(self, code, color):
-        a = self.units.get(code)
-        if a is not None:
-            from PySide6.QtGui import QColor
+        """Plain-colour units change at once; textured ones are redrawn by the caller."""
+        from PySide6.QtGui import QColor
 
-            c = QColor(color)
-            a.GetProperty().SetColor(c.redF(), c.greenF(), c.blueF())
+        c = QColor(render.enhance(color) if self.look.get("vivid") else color)
+        for key, a in self.units.items():
+            if self.unit_code.get(key, key) == code:
+                a.GetProperty().SetColor(c.redF(), c.greenF(), c.blueF())
         self.plotter.render()
+
+    def set_ssao(self, on: bool):
+        p = self.plotter
+        try:
+            if on:
+                b = p.bounds
+                span = max(b[1] - b[0], b[3] - b[2], b[5] - b[4]) or 1.0
+                p.enable_ssao(radius=span * 0.03, bias=span * 0.0005, kernel_size=128, blur=True)
+            else:
+                p.disable_ssao()
+        except Exception as e:  # noqa: BLE001
+            self.message.emit(f"Ambient occlusion is not supported by this graphics driver ({e}).")
+        p.render()
 
     def set_axes_grid(self, on: bool):
         self.show_axes_grid = on
@@ -302,8 +433,17 @@ class Viewer3D(QWidget):
             name="terrain", show_scalar_bar=True, specular=0.1,
             scalar_bar_args=dict(title="DEM elevation (m)", color=self._fg(), vertical=True, position_x=0.9,
                                  position_y=0.25, height=0.5, width=0.05, title_font_size=11, label_font_size=9))
+        self._style_scalar_bars()
         self.plotter.render()
         return True
+
+    def _style_scalar_bars(self):
+        for sb in list(getattr(self.plotter, "scalar_bars", {}).values()):
+            try:
+                render.style_text(sb.GetTitleTextProperty(), size=13, bold=True, color=self._fg())
+                render.style_text(sb.GetLabelTextProperty(), size=11, color=self._fg(), weight="medium")
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_extras_visible(self, prefix: str, visible: bool):
         for name, actor in list(self.plotter.renderer.actors.items()):
@@ -319,7 +459,7 @@ class Viewer3D(QWidget):
         self.disable_clip()
         plane = vtk.vtkPlane()
         self._clip_plane = plane
-        for a in self.units.values():
+        for a in list(self.units.values()) + [e for e in self.edges.values() if e is not None]:
             a.GetMapper().AddClippingPlane(plane)
 
         def moved(n, origin):
@@ -333,7 +473,7 @@ class Viewer3D(QWidget):
 
     def disable_clip(self):
         if self._clip_plane is not None:
-            for a in self.units.values():
+            for a in list(self.units.values()) + [e for e in self.edges.values() if e is not None]:
                 a.GetMapper().RemoveAllClippingPlanes()
             self._clip_plane = None
         try:
@@ -342,18 +482,67 @@ class Viewer3D(QWidget):
             pass
         self.plotter.render()
 
-    def screenshot(self, path, scale: int = 3, transparent=False, legend=True):
-        """High-resolution image; the legend bar is added below the 3D view."""
-        self.plotter.screenshot(str(path), scale=scale, transparent_background=transparent)
-        if legend and self.legend.isVisible() and self.legend.items:
-            from PySide6.QtGui import QImage, QPainter
+    def _render_large(self, W: int, transparent=False):
+        """The current scene re-rendered in tiles at about W pixels wide, with fonts and line widths
+        multiplied by the same factor so that the picture keeps its on-screen proportions."""
+        import math
 
-            shot = QImage(str(path))
-            leg = self.legend.image(shot.width(), scale=float(scale))
-            out = QImage(shot.width(), shot.height() + leg.height(), QImage.Format_ARGB32)
-            p = QPainter(out)
-            p.drawImage(0, 0, shot)
-            p.drawImage(0, shot.height(), leg)
-            p.end()
-            out.save(str(path))
+        src = self.plotter
+        w = max(src.window_size[0], 1)
+        scale = max(1, math.ceil(W / w))
+        props = []
+        coll = src.renderer.GetViewProps()
+        coll.InitTraversal()
+        for _ in range(coll.GetNumberOfItems()):
+            props.append(coll.GetNextProp())
+        a = getattr(src.renderer, "axes_actor", None)
+        if a is not None:
+            props += [a.GetXAxisCaptionActor2D(), a.GetYAxisCaptionActor2D(), a.GetZAxisCaptionActor2D()]
+        with render.ScaledProps(props, scale):
+            arr = src.screenshot(None, scale=scale, return_img=True, transparent_background=transparent)
+        src.render()
+        return arr
+
+    def screenshot(self, path, scale: int = 3, transparent=False, legend=True):
+        """Quick high-resolution image (window size × ``scale``)."""
+        w = self.plotter.window_size[0]
+        return self.export_image(path, w * scale, 300, legend=legend, transparent=transparent)
+
+    def export_image(self, path, width_px: int, dpi: int = 1000, legend=True, transparent=False):
+        """Print-quality image ``width_px`` wide, tagged with ``dpi`` (e.g. 180 mm at 1000 dpi = 7087 px).
+
+        The scene is rendered once more, off screen, at the full output size with fonts and line widths
+        scaled to match, so text, labels and lines keep their proportions and stay sharp; the legend bar
+        is drawn below it at the same scale.
+        """
+        from PIL import Image
+
+        Image.MAX_IMAGE_PIXELS = None
+        img = Image.fromarray(self._render_large(int(width_px), transparent))
+        if legend and self.legend.isVisible() and self.legend.items:
+            from PySide6.QtCore import QBuffer, QIODevice
+
+            s = img.width / max(self.legend.width(), 1)
+            q = self.legend.image(img.width, scale=s)
+            buf = QBuffer()
+            buf.open(QIODevice.WriteOnly)
+            q.save(buf, "PNG")
+            import io
+
+            leg = Image.open(io.BytesIO(bytes(buf.data()))).convert(img.mode)
+            out = Image.new(img.mode, (img.width, img.height + leg.height))
+            out.paste(img, (0, 0))
+            out.paste(leg, (0, img.height))
+            img = out
+        if img.width != width_px:
+            img = img.resize((int(width_px), round(img.height * width_px / img.width)), Image.LANCZOS)
+        path = str(path)
+        ext = path.lower().rsplit(".", 1)[-1]
+        kw = {"dpi": (dpi, dpi)}
+        if ext in ("tif", "tiff"):
+            kw["compression"] = "tiff_lzw"
+        elif ext in ("jpg", "jpeg"):
+            img = img.convert("RGB")
+            kw.update(quality=95, subsampling=0)
+        img.save(path, **kw)
         return path

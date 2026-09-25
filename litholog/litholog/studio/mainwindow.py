@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
         self.dem = None
         self.dem_path = None
         self.layer_state = {}    # code -> {"visible": bool, "opacity": 0-1}
+        self.hz_state = {}       # horizon index -> visible
         self._redo = {}          # document -> callable that redraws it (after legend edits)
         self._current_map = None
 
@@ -149,11 +150,25 @@ class MainWindow(QMainWindow):
             ("sh_grid", "mdi6.axis-arrow-info", "Axes grid", self.toggle_grid, True),
             ("sh_terrain", "mdi6.terrain", "Terrain\n(DEM)", self.toggle_terrain, True),
         ])
+        r.group(vw, "Rendering", [
+            ("rn_grain", "mdi6.texture-box", "Rock\ntexture", lambda on: self.set_texture("grain", on), True),
+            ("rn_pattern", "mdi6.view-grid-outline", "Pattern\ntexture", lambda on: self.set_texture("pattern", on),
+             True),
+            ("rn_vivid", "mdi6.palette", "Vivid\ncolour", lambda on: self.set_look("vivid", on), True),
+            ("rn_edges", "mdi6.vector-polyline", "Contact\nlines", lambda on: self.set_look("edges", on), True),
+            ("rn_ssao", "mdi6.brightness-6", "Ambient\nocclusion", lambda on: self.set_look("ssao", on), True),
+        ])
         r.group(vw, "Layers", [("layers2", "mdi6.palette-swatch-outline", "Layer\nproperties",
                                 lambda: self.layer_properties(), False)])
         r.buttons["sh_legend"].setChecked(True)
         r.buttons["sh_grid"].setChecked(True)
         r.buttons["bg_theme"].setChecked(True)
+        from .viewer3d import DEFAULT_LOOK
+
+        r.buttons["rn_grain"].setChecked(DEFAULT_LOOK["texture"] == "grain")
+        r.buttons["rn_pattern"].setChecked(DEFAULT_LOOK["texture"] == "pattern")
+        for k in ("vivid", "edges", "ssao"):
+            r.buttons[f"rn_{k}"].setChecked(DEFAULT_LOOK[k])
         r.buttons["th_dark"].setChecked(theme.MODE == "dark")
         r.buttons["th_light"].setChecked(theme.MODE == "light")
         self.setMenuWidget(r)
@@ -415,7 +430,8 @@ class MainWindow(QMainWindow):
                 "method": self.p_method.currentData(), "interpolation": self.p_grid.currentData(),
                 "use_dem": self.p_usedem.isChecked(), "rectify": self.p_rectify.isChecked(),
                 "layers": self.layer_state, "legend_rows": list(getattr(self, "_legend_rows", {}).values()),
-                "legend_title": self.viewer.legend.title, "background": self.viewer.background}
+                "legend_title": self.viewer.legend.title, "background": self.viewer.background,
+                "look": self.viewer.look, "horizons_visible": {str(k): v for k, v in self.hz_state.items()}}
 
     def apply_settings(self, st: dict):
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
@@ -441,6 +457,14 @@ class MainWindow(QMainWindow):
         self.viewer.legend.title = st.get("legend_title", "Lithology")
         if st.get("background"):
             self.set_bg(st["background"])
+        if st.get("look"):
+            self.viewer.look.update(st["look"])
+            lk = self.viewer.look
+            self.ribbon.buttons["rn_grain"].setChecked(lk.get("texture") == "grain")
+            self.ribbon.buttons["rn_pattern"].setChecked(lk.get("texture") == "pattern")
+            for k in ("vivid", "edges", "ssao"):
+                self.ribbon.buttons[f"rn_{k}"].setChecked(bool(lk.get(k)))
+        self._pending_hz = {int(k): v for k, v in st.get("horizons_visible", {}).items()}
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
                   self.p_holes, self.p_labels, self.p_bnd, self.p_clipb):
             w.blockSignals(False)
@@ -572,6 +596,8 @@ class MainWindow(QMainWindow):
         if self.model is not None:
             mu = QTreeWidgetItem(root, ["3D model units"])
             mu.setIcon(0, theme.icon("mdi6.cube-outline", theme.TEXT_DIM))
+            mu.setFlags(mu.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+            mu.setToolTip(0, "Tick / untick to show or hide all layers")
             for c in self.model.codes:
                 it = QTreeWidgetItem(mu, [self.project.legend.get(c).name])
                 it.setIcon(0, swatch(self.project.legend.get(c).color))
@@ -583,17 +609,32 @@ class MainWindow(QMainWindow):
             if getattr(self.model, "kind", "") == "horizon":
                 hz = QTreeWidgetItem(root, [f"Horizons ({len(self.model.horizons)})"])
                 hz.setIcon(0, theme.icon("mdi6.layers-triple-outline", theme.TEXT_DIM))
-                for lab, h, v in zip(self.model.h_labels, self.model.horizons, self.model.h_volumes):
-                    it = QTreeWidgetItem(hz, [f"{lab} · {v / 1e6:,.0f} MCM"])
+                hz.setFlags(hz.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+                hz.setToolTip(0, "Tick / untick each horizon to show or hide it in 3D")
+                for k, (lab, h, v) in enumerate(zip(self.model.h_labels, self.model.horizons,
+                                                    self.model.h_volumes)):
+                    it = QTreeWidgetItem(hz, [f"{k + 1}. {lab} · {v / 1e6:,.1f} MCM"])
                     it.setIcon(0, swatch(self.project.legend.get(h["code"]).color))
-                    it.setData(0, Qt.UserRole, ("legend", h["code"]))
-                hz.setExpanded(False)
+                    it.setData(0, Qt.UserRole, ("horizon", k, h["code"]))
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                    it.setCheckState(0, Qt.Checked if self.hz_state.get(k, True) else Qt.Unchecked)
+                    it.setToolTip(0, f"Present in {h['n']} boreholes · tick to show/hide · "
+                                     "double-click for layer properties")
+                hz.setExpanded(True)
+                _sync_parent(hz)
+        if self.model is not None:
+            _sync_parent(mu)
         t.expandAll()
         bh.setExpanded(len(self.project.ids) <= 30)
         t.blockSignals(False)
 
     def _tree_changed(self, item, col):
         tag = item.data(0, Qt.UserRole)
+        if tag and tag[0] == "horizon":
+            vis = item.checkState(0) == Qt.Checked
+            self.hz_state[tag[1]] = vis
+            self.viewer.set_horizon_visible(tag[1], vis)
+            return
         if tag and tag[0] == "unit":
             vis = item.checkState(0) == Qt.Checked
             self.layer_state.setdefault(tag[1], {})["visible"] = vis
@@ -606,6 +647,8 @@ class MainWindow(QMainWindow):
             self.show_striplog(bid=tag[1])
         elif tag and tag[0] in ("unit", "legend"):
             self.layer_properties(tag[1])
+        elif tag and tag[0] == "horizon":
+            self.layer_properties(tag[2])
 
     def _set_unit_visible(self, code, vis):
         """From the legend bar: keep explorer, viewer and state in step."""
@@ -668,6 +711,8 @@ class MainWindow(QMainWindow):
 
         def done(model):
             self.model = model
+            self.hz_state = getattr(self, "_pending_hz", None) or {}
+            self._pending_hz = None
             self._refresh_tree()
             nz, ny, nx = model.lith.shape
             kind = "Horizon model" if getattr(model, "kind", "") == "horizon" else "Voxel model"
@@ -703,7 +748,8 @@ class MainWindow(QMainWindow):
         from ..solid import build_solids
 
         cut = self.p_cut.currentData()
-        self.solids = build_solids(self.model, self.p_smooth.value() / 4, cut)
+        self.solids = build_solids(self.model, self.p_smooth.value() / 4, cut,
+                                   per_horizon=getattr(self.model, "kind", "") == "horizon")
         ve = self.p_ve.value() or self._auto_ve()
         cam = None if reset_view else self.viewer.plotter.camera_position
         self.viewer.show_model(self.model, self.solids, self.project.legend, ve,
@@ -722,9 +768,11 @@ class MainWindow(QMainWindow):
             tag = it.data(0, Qt.UserRole) if it is not root else None
             if tag and tag[0] == "unit" and it.checkState(0) != Qt.Checked:
                 self.viewer.set_unit_visible(tag[1], False)
-        for code, st in self.layer_state.items():
-            if not st.get("visible", True):
-                self.viewer.set_unit_visible(code, False)
+        self.viewer.code_vis = {c: st.get("visible", True) for c, st in self.layer_state.items()}
+        self.viewer.hz_vis = dict(self.hz_state)
+        self.viewer._apply_visibility(render=False)
+        if self.viewer.look.get("ssao"):
+            self.viewer.set_ssao(True)
         self.viewer.set_opacity(self.p_opacity.value() / 100, self._unit_opacity())
         if self.ribbon.buttons["sh_terrain"].isChecked() and self.dem is not None:
             self.viewer.show_terrain(self.dem, self.model, ve)
@@ -872,6 +920,8 @@ class MainWindow(QMainWindow):
             self._refresh_tree()
             if self.model is not None:
                 self._fill_volumes(self._sy())
+                if self.viewer.look.get("texture", "none") != "none" or self.viewer.look.get("edges"):
+                    self.redraw()
             for fn in list(self._redo.values()):  # redraw open logs, sections, maps with the new legend
                 try:
                     fn()
@@ -950,6 +1000,19 @@ class MainWindow(QMainWindow):
         self._refresh_tree()
         if self.model is not None:
             self._fill_volumes(self._sy())
+            self.redraw()
+
+    def set_texture(self, kind, on):
+        self.ribbon.buttons["rn_grain"].setChecked(on and kind == "grain")
+        self.ribbon.buttons["rn_pattern"].setChecked(on and kind == "pattern")
+        self.viewer.look["texture"] = kind if on else "none"
+        self.redraw()
+
+    def set_look(self, key, on):
+        self.viewer.look[key] = bool(on)
+        if key == "ssao":
+            self.viewer.set_ssao(on)
+        else:
             self.redraw()
 
     def set_bg(self, name):
@@ -1224,14 +1287,44 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ export
     def save_image(self):
         w = self.docs.currentWidget()
-        path, _ = QFileDialog.getSaveFileName(self, "Save image", "litholog.png", "PNG image (*.png)")
+        is3d = w is self.viewer
+        if not is3d and not (isinstance(w, FigureDoc) and w.figure is not None):
+            QMessageBox.information(self, "Save image", "Open the 3D model or a log, section, map first.")
+            return
+        page_mm = None if is3d else w.figure.get_size_inches()[0] * 25.4
+        dlg = ExportImageDialog(is3d, page_mm, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        width_mm, dpi, ext = dlg.values()
+        path, _ = QFileDialog.getSaveFileName(self, "Save image", f"litholog.{ext}",
+                                              "PNG (*.png);;TIFF (*.tif);;JPEG (*.jpg)")
         if not path:
             return
-        if w is self.viewer:
-            self.viewer.screenshot(path, scale=3)
-        elif isinstance(w, FigureDoc) and w.figure is not None:
-            w.figure.savefig(path, dpi=300)
-        self.log(f"Saved {path}")
+        px = int(round(width_mm / 25.4 * dpi))
+
+        def work():
+            if is3d:
+                return self.viewer.export_image(path, px, dpi)
+            from PIL import Image
+
+            Image.MAX_IMAGE_PIXELS = None
+            kw = {"pil_kwargs": {"compression": "tiff_lzw"}} if path.lower().endswith((".tif", ".tiff")) else {}
+            w.figure.savefig(path, dpi=dpi, **kw)
+            return path
+
+        self.busy.show()
+        self.log(f"Rendering {px:,} px wide image at {dpi} dpi …")
+        QApplication.processEvents()
+        try:
+            work()   # rendering must stay on the GUI thread (OpenGL)
+            self.log(f"Saved {path}  ({width_mm:.0f} mm at {dpi} dpi)")
+        except MemoryError:
+            QMessageBox.warning(self, "Save image", "Not enough memory for this size. Use a smaller width or "
+                                                    "DPI, or save the page as PDF/SVG (vector, any zoom).")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Save image", str(e))
+        finally:
+            self.busy.hide()
 
     def save_page(self):
         w = self.docs.currentWidget()
@@ -1307,6 +1400,13 @@ class MainWindow(QMainWindow):
             vols.insert(1, "name", [self.project.legend.get(c).name for c in vols["code"]])
             vols.to_csv(path, index=False)
             self.log(f"Saved {path}")
+
+
+def _sync_parent(item):
+    """Tick state of a group item from its children (without touching the children)."""
+    states = {item.child(k).checkState(0) for k in range(item.childCount())}
+    item.setCheckState(0, Qt.Checked if states == {Qt.Checked} else
+                       Qt.Unchecked if states == {Qt.Unchecked} else Qt.PartiallyChecked)
 
 
 def _save_obj(mesh, path):
@@ -1564,3 +1664,59 @@ class ChemDoc(QWidget):
             else:
                 hc.wilcox(self.df, res, ax)
         self.fig.set_figure(fig)
+
+
+class ExportImageDialog(QDialog):
+    """Print size and resolution for image export (default 1000 dpi)."""
+
+    PRESETS = [("Journal column (90 mm)", 90), ("Journal page width (180 mm)", 180), ("A4 landscape (277 mm)", 277),
+               ("A3 landscape (400 mm)", 400)]
+
+    def __init__(self, is3d, page_mm=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Save image")
+        f = QFormLayout(self)
+        self.size = QComboBox()
+        for label, mm in self.PRESETS:
+            self.size.addItem(label, mm)
+        if page_mm:
+            self.size.insertItem(0, f"Page size ({page_mm:.0f} mm)", page_mm)
+        self.size.setCurrentIndex(0 if page_mm else 1)
+        self.width = QDoubleSpinBox(minimum=20, maximum=1200, decimals=0, suffix=" mm")
+        self.width.setValue(self.size.currentData())
+        self.size.currentIndexChanged.connect(lambda _: self.width.setValue(self.size.currentData()))
+        self.dpi = QComboBox()
+        for d in (300, 600, 1000, 1200):
+            self.dpi.addItem(f"{d} dpi", d)
+        self.dpi.setCurrentIndex(2)
+        self.fmt = QComboBox()
+        for label, ext in (("PNG (lossless)", "png"), ("TIFF (LZW, for print)", "tif"), ("JPEG", "jpg")):
+            self.fmt.addItem(label, ext)
+        self.info = QLabel()
+        self.info.setObjectName("Dim")
+        self.info.setWordWrap(True)
+        f.addRow("Size", self.size)
+        f.addRow("Width", self.width)
+        f.addRow("Resolution", self.dpi)
+        f.addRow("Format", self.fmt)
+        f.addRow(self.info)
+        if is3d:
+            n = QLabel("The 3D scene is re-rendered at full resolution (not enlarged); the legend bar is "
+                       "added below it.")
+            n.setObjectName("Dim")
+            n.setWordWrap(True)
+            f.addRow(n)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+        for w in (self.width, self.dpi):
+            (w.valueChanged if w is self.width else w.currentIndexChanged).connect(self._info)
+        self._info()
+
+    def _info(self, *_):
+        px = self.width.value() / 25.4 * self.dpi.currentData()
+        self.info.setText(f"{px:,.0f} pixels wide")
+
+    def values(self):
+        return self.width.value(), self.dpi.currentData(), self.fmt.currentData()

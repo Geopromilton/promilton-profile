@@ -7,6 +7,9 @@ from .patterns import DEFAULT_LEGEND, Legend, LithType  # noqa: E402
 from .project import Borehole, Project  # noqa: E402
 from .striplog import Style, save_striplog, striplog_pages  # noqa: E402
 from .validate import Issue, validate  # noqa: E402
+from .typeface import use_in_matplotlib  # noqa: E402
+
+use_in_matplotlib()
 
 __all__ = [
     "Borehole", "DEFAULT_LEGEND", "Issue", "Legend", "LithType", "Project", "Style",

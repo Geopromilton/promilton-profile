@@ -48,7 +48,7 @@ class Style:
     well_w: float = 26.0
     curve_w: float = 24.0
     max_curves: int = 3
-    font: str = "DejaVu Sans"
+    font: str = "Inter"
     desc_size: float = 6.3
     project_name: str = ""
 
@@ -123,7 +123,11 @@ def save_striplog(bh: Borehole, legend: Legend, path, style: Style | None = None
 
 
 def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
-    plt.rcParams["font.family"] = s.font
+    from .typeface import use_in_matplotlib
+
+    use_in_matplotlib()
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = [s.font, "Inter", "DejaVu Sans", "Arial"]
     pg = _Page(s)
     fig = pg.fig
 

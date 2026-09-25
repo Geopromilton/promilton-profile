@@ -318,8 +318,9 @@ def _layer_mesh(x, y, top, bot, active_nodes, cell_ok):
     return verts, faces
 
 
-def horizon_solids(model, cutaway: str | None = None, only=None):
-    """One Solid per lithology code (its horizons merged), meshed from the surfaces."""
+def horizon_solids(model, cutaway: str | None = None, only=None, per_horizon: bool = False):
+    """Solids meshed from the horizon surfaces: one per lithology code (its horizons merged),
+    or with ``per_horizon`` one per horizon (``Solid.horizon`` = its index)."""
     from .solid import Solid
 
     ny, nx = model.inside.shape
@@ -341,9 +342,10 @@ def horizon_solids(model, cutaway: str | None = None, only=None):
         if not cell_ok.any():
             continue
         v, f = _layer_mesh(model.x, model.y, t, b, None, cell_ok)
-        per_code.setdefault(h["code"], []).append((v, f))
+        per_code.setdefault(k if per_horizon else h["code"], []).append((v, f))
     solids = []
-    for code, parts in per_code.items():
+    for key, parts in per_code.items():
+        code = model.horizons[key]["code"] if per_horizon else key
         vs, fs, off = [], [], 0
         for v, f in parts:
             vs.append(v)
@@ -353,5 +355,5 @@ def horizon_solids(model, cutaway: str | None = None, only=None):
         used = np.unique(F)  # drop unreferenced vertices
         remap = np.full(len(V), -1)
         remap[used] = np.arange(len(used))
-        solids.append(Solid(code, V[used], remap[F].astype(np.int32)))
+        solids.append(Solid(code, V[used], remap[F].astype(np.int32), key if per_horizon else None))
     return solids
