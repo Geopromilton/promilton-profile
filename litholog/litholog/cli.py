@@ -111,6 +111,8 @@ def main(argv=None) -> int:
     md.add_argument("--title", help="project name")
     md.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
 
+    sub.add_parser("studio", help="open LithoLog Studio, the desktop application")
+
     ap = sub.add_parser("app", help="open the LithoLog browser app")
     ap.add_argument("--port", type=int, default=8501)
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser window")
@@ -122,7 +124,8 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     return {"template": _template, "validate": _validate, "striplog": _striplog,
             "legend": _legend, "convert": _convert, "section": _section, "fence": _fence,
-            "map": _map, "model": _model, "app": _app}[a.cmd](a)
+            "map": _map, "model": _model, "app": _app,
+            "studio": _studio}[a.cmd](a)
 
 
 def _template(a):
@@ -387,6 +390,16 @@ def _boundary(a, project):
         if len(out):
             print(f"Note: {len(out)} borehole(s) lie outside the boundary: {', '.join(out['borehole_id'])}")
     return boundary
+
+
+def _studio(a):
+    try:
+        from .studio import main as studio_main
+    except ImportError as e:
+        print(f"LithoLog Studio needs the desktop extras: pip install \"litholog[studio]\"  ({e})",
+              file=sys.stderr)
+        return 2
+    return studio_main(["litholog-studio"])
 
 
 def _app(a):

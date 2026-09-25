@@ -19,13 +19,17 @@ classifiers = [
 
 [project.optional-dependencies]
 app = ["streamlit>=1.50"]
+studio = ["PySide6>=6.6", "pyvista>=0.43", "pyvistaqt>=0.11", "qtawesome>=1.3"]
 dev = ["pytest", "streamlit>=1.50"]
 
 [project.scripts]
 litholog = "litholog.cli:main"
 
+[project.gui-scripts]
+litholog-studio = "litholog.studio:main"
+
 [tool.setuptools]
-packages = ["litholog"]
+packages = ["litholog", "litholog.studio"]
 
 [tool.setuptools.package-data]
 litholog = ["data/*.xlsx"]
