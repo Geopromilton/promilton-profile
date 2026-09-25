@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import Qt, QThreadPool, QTimer
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
@@ -66,6 +66,11 @@ class MainWindow(QMainWindow):
         self._build_properties()
         self._build_messages()
         self._build_status()
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        QShortcut(QKeySequence.Save, self, activated=self.save_project)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=lambda: self.save_project(save_as=True))
+        QShortcut(QKeySequence.Open, self, activated=self.open_project)
         self.log(f"LithoLog Studio {__version__} ready. Open borehole data (Home ▸ Open data) "
                  "or load the demo project.")
 
@@ -76,6 +81,7 @@ class MainWindow(QMainWindow):
         r.group(home, "Project file", [
             ("proj_open", "mdi6.folder-star-outline", "Open project", self.open_project, False),
             ("proj_save", "mdi6.content-save-outline", "Save project", self.save_project, False),
+            ("proj_saveas", "mdi6.content-save-edit-outline", "Save as…", lambda: self.save_project(save_as=True), False),
         ])
         r.group(home, "Data", [
             ("open", "mdi6.folder-open-outline", "Open data", self.open_data, False),
@@ -444,6 +450,7 @@ class MainWindow(QMainWindow):
                 project.name = name
             self.project, self.data_path, self.model, self.solids = project, path, None, None
             if not after:  # new data (not a project file): start with a clean layer set-up
+                self.project_path, self._saved_key = None, None
                 self.dem, self.dem_path, self.layer_state, self._legend_rows = None, None, {}, {}
                 self.constraints, self.constraints_path = None, None
                 self.viewer.scene_state = {}
@@ -534,17 +541,56 @@ class MainWindow(QMainWindow):
             w.blockSignals(False)
         self._pending_sy = st.get("specific_yield", {})
 
-    def save_project(self):
+    def _state_key(self):
+        """Everything a project file stores, as text: compared with the last save to detect changes."""
+        import json
+
+        if self.project is None:
+            return None
+        return json.dumps({"name": self.project.name, "data": self.data_path, "legend": self.legend_path,
+                           "boundary": self.boundary_path, "dem": self.dem_path, "settings": self.settings()},
+                          sort_keys=True, default=str)
+
+    def is_modified(self) -> bool:
+        return self.project is not None and self._state_key() != getattr(self, "_saved_key", None)
+
+    def save_project(self, checked=False, save_as=False) -> bool:
+        """Save to the current project file (asks for a name the first time). Returns True when saved."""
         if not self.need_project():
-            return
+            return False
         from .projectfile import save
 
-        path, _ = QFileDialog.getSaveFileName(self, "Save project", f"{self.project.name}.llproj",
-                                              "LithoLog project (*.llproj)")
-        if path:
-            save(path, self.project.name, self.data_path, self.legend_path, self.boundary_path, self.settings(),
-                 dem=self.dem_path)
-            self.log(f"Project saved: {path}")
+        path = getattr(self, "project_path", None)
+        if save_as or not path:
+            path, _ = QFileDialog.getSaveFileName(self, "Save project", path or f"{self.project.name}.llproj",
+                                                  "LithoLog project (*.llproj)")
+        if not path:
+            return False
+        save(path, self.project.name, self.data_path, self.legend_path, self.boundary_path, self.settings(),
+             dem=self.dem_path)
+        self.project_path = path
+        self._saved_key = self._state_key()
+        self.setWindowTitle(f"LithoLog Studio {__version__} — {Path(path).name}")
+        self.log(f"Project saved: {path}")
+        return True
+
+    def closeEvent(self, e):
+        if self.is_modified():
+            m = QMessageBox(self)
+            m.setIcon(QMessageBox.Warning)
+            m.setWindowTitle("LithoLog Studio")
+            name = Path(self.project_path).name if getattr(self, "project_path", None) else "this project"
+            m.setText(f"Do you want to save the changes to {name}?")
+            m.setInformativeText("The project file keeps the data, legend and colours, boundary, DEM, constraints "
+                                 "and all settings. Your changes will be lost if you don't save them.")
+            m.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            m.button(QMessageBox.Discard).setText("Don't save")
+            m.setDefaultButton(QMessageBox.Save)
+            r = m.exec()
+            if r == QMessageBox.Cancel or (r == QMessageBox.Save and not self.save_project()):
+                e.ignore()
+                return
+        e.accept()
 
     def open_project(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open project", "", "LithoLog project (*.llproj)")
@@ -554,6 +600,8 @@ class MainWindow(QMainWindow):
     def load_project_file(self, path):
         from .projectfile import load
 
+        self.project_path = path
+        self._clean_after_build = True
         try:
             pf = load(path)
         except Exception as e:  # noqa: BLE001
@@ -878,6 +926,11 @@ class MainWindow(QMainWindow):
 
         def done(model):
             self.model = model
+            if getattr(self, "_clean_after_build", False):   # just opened from a project file: unchanged
+                self._clean_after_build = False
+                QTimer.singleShot(0, lambda: setattr(self, "_saved_key", self._state_key()))
+                if getattr(self, "project_path", None):
+                    self.setWindowTitle(f"LithoLog Studio {__version__} — {Path(self.project_path).name}")
             self.hz_state = getattr(self, "_pending_hz", None) or {}
             self._pending_hz = None
             self._refresh_tree()

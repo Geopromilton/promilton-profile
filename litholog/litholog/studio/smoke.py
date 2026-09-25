@@ -33,6 +33,7 @@ def run(timeout: float = 300) -> int:
         w.set_theme("dark")
         app.processEvents()
     print("LithoLog Studio smoke test:", "OK" if ok else "FAILED")
+    w._saved_key = w._state_key()     # nothing to save in a self-test
     w.close()
     return 0 if ok else 1
 
