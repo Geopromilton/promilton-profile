@@ -76,6 +76,9 @@ def main(argv=None) -> int:
     mp.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
     mp.add_argument("--cell", type=float, help="grid cell size in m (default: ~150 cells across)")
     mp.add_argument("--no-mask", action="store_true", help="grid the full rectangle, not just the borehole area")
+    mp.add_argument("--boundary", help="study-area polygon shapefile (.shp) to clip the maps to")
+    mp.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643 "
+                                  "(default: match the boundary automatically)")
     mp.add_argument("-o", "--out", default="maps", help="output folder (default: maps)")
     mp.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
     mp.add_argument("--page", default="A3", choices=["A3", "A4"])
@@ -91,6 +94,8 @@ def main(argv=None) -> int:
                          "hard-rock aquifers) or equal elevation (flat-lying sediments)")
     md.add_argument("--only", nargs="+", metavar="CODE", help="also draw these units on their own")
     md.add_argument("--sy", nargs="+", metavar="CODE=SY", help="specific yield per unit, e.g. 4=0.015")
+    md.add_argument("--boundary", help="study-area polygon shapefile (.shp) to clip the model to")
+    md.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643")
     md.add_argument("--ve", type=float, help="vertical exaggeration")
     md.add_argument("--azim", type=float, default=-60)
     md.add_argument("--elev", type=float, default=30)
@@ -284,10 +289,12 @@ def _map(a):
     from .maps import save_map
 
     project = load_project(a.data, legend=a.legend)
+    boundary = _boundary(a, project)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     for attr in a.attributes:
-        grid, vals = grid_attribute(project, attr, a.method, a.cell, mask="none" if a.no_mask else "hull")
+        grid, vals = grid_attribute(project, attr, a.method, a.cell, mask="none" if a.no_mask else "hull",
+                                    boundary=boundary)
         stem = out / _safe(attr.replace(":", "_"))
         save_map(grid, vals, attr, stem.with_suffix(f".{a.format}"), legend=project.legend, method=a.method,
                  title=a.title or project.name, page=a.page, all_xy=project.boreholes)
@@ -296,7 +303,10 @@ def _map(a):
         name, unit = attribute_label(attr, project.legend)
         extra = ""
         if attr.startswith("thickness"):
-            extra = f", isopach volume {float(__import__('numpy').nansum(grid.z)) * grid.cell ** 2 / 1e6:,.1f} MCM"
+            import numpy as np
+
+            vol = float(np.nansum(np.where(grid.valid, grid.z, np.nan))) * grid.cell ** 2
+            extra = f", isopach volume {vol / 1e6:,.1f} MCM"
         print(f"  {stem.with_suffix('.' + a.format)}  ({name}, {vals['value'].notna().sum()} holes{extra})")
     print(f"  grids (.asc, open in QGIS/ArcGIS/Surfer) and values (.csv) in {out}")
     return 0
@@ -311,7 +321,8 @@ def _model(a):
     for item in a.sy or []:
         code, _, val = item.partition("=")
         sy[code.strip().upper()] = float(val)
-    model = build_model(project, a.cell, a.dz, datum=a.datum)
+    boundary = _boundary(a, project)
+    model = build_model(project, a.cell, a.dz, datum=a.datum, boundary=boundary)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     kw = dict(title=a.title or project.name, sy=sy, ve=a.ve, azim=a.azim, elev=a.elev)
@@ -326,11 +337,34 @@ def _model(a):
     files += [out / "volumes.csv", write_vtk(model, out / "model.vtk")]
     nz, ny, nx = model.lith.shape
     print(f"Model {nx} x {ny} x {nz} voxels ({model.cell:g} x {model.cell:g} x {model.dz:g} m), datum: {a.datum}")
+    if boundary is not None:
+        area = (model.lith >= 0).any(0).sum() * model.cell ** 2 / 1e6
+        print(f"Clipped to {boundary.name}: polygon {boundary.area / 1e6:,.1f} km², model {area:,.1f} km²"
+              + (f"; {100 * (1 - model.coverage):.0f} % beyond the boreholes (extrapolated)"
+                 if model.coverage is not None else ""))
     cols = ["code", "name", "volume_mcm", "percent"] + (["specific_yield", "storage_mcm"] if sy else [])
     print(vols[cols].round({"volume_mcm": 1, "percent": 1, "storage_mcm": 2}).to_string(index=False))
     for f in files:
         print(f"  {f}")
     return 0
+
+
+def _boundary(a, project):
+    """Load --boundary (reprojected to the boreholes' system), reporting what was done."""
+    if not getattr(a, "boundary", None):
+        return None
+    from .boundary import load_boundary
+
+    b = project.boreholes.dropna(subset=["x", "y"])
+    near = (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()) if len(b) else None
+    boundary = load_boundary(a.boundary, crs=a.crs, near=near)
+    if boundary.crs_note:
+        print(f"Boundary: {boundary.crs_note}")
+    if len(b):
+        out = b[~boundary.contains(b[["x", "y"]].to_numpy(float))]
+        if len(out):
+            print(f"Note: {len(out)} borehole(s) lie outside the boundary: {', '.join(out['borehole_id'])}")
+    return boundary
 
 
 def _safe(name: str) -> str:

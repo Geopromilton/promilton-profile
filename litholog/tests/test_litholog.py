@@ -289,3 +289,62 @@ def test_map_and_model_cli(tmp_path):
                  "-o", str(tmp_path / "model"), "-f", "png"]) == 0
     for name in ("block_model.png", "block_model_4.png", "slices.png", "volumes.csv", "model.vtk"):
         assert (tmp_path / "model" / name).exists()
+
+
+# --- Study-area boundary (shapefile) ---------------------------------------------
+
+def _write_boundary(path, rings, epsg=None):
+    import shapefile
+
+    w = shapefile.Writer(str(path), shapeType=shapefile.POLYGON)
+    w.field("Id", "N")
+    w.poly(rings)
+    w.record(1)
+    w.close()
+    if epsg:
+        from pyproj import CRS
+
+        path.with_suffix(".prj").write_text(CRS.from_epsg(epsg).to_wkt("WKT1_ESRI"))
+
+
+def test_boundary_area_hole_and_mask(tmp_path):
+    import numpy as np
+
+    from litholog.boundary import load_boundary
+
+    outer = [(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)]
+    hole = [(40, 40), (60, 40), (60, 60), (40, 60), (40, 40)]
+    _write_boundary(tmp_path / "b.shp", [outer, hole])
+    b = load_boundary(tmp_path / "b.shp")
+    assert abs(b.area - (10000 - 400)) < 1e-6
+    assert list(b.contains([[10, 10], [50, 50], [150, 50]])) == [True, False, False]
+    m = b.mask(np.arange(5, 100, 10.0), np.arange(5, 100, 10.0))
+    assert m.sum() == 100 - 4
+
+
+def test_boundary_auto_utm_zone_and_clipping(tmp_path):
+    import numpy as np
+    from pyproj import Transformer
+
+    from litholog.boundary import load_boundary
+    from litholog.grid import grid_attribute
+    from litholog.model3d import build_model
+
+    proj, _ = _grid_project(tmp_path)
+    # Shift the synthetic holes into UTM 43N near 77.6 E, 8.4 N.
+    proj.boreholes["x"] += 780000
+    proj.boreholes["y"] += 930000
+    ring43 = np.array([(779500, 929500), (779500, 932500), (782500, 932500), (782500, 929500)])
+    x44, y44 = Transformer.from_crs(32643, 32644, always_xy=True).transform(ring43[:, 0], ring43[:, 1])
+    _write_boundary(tmp_path / "sa.shp", [list(zip(x44, y44)) + [(x44[0], y44[0])]], epsg=32644)
+    b = load_boundary(tmp_path / "sa.shp", near=(780000, 782000, 930000, 932000))
+    assert "EPSG:32643" in b.crs_note
+    assert abs(b.area - 9e6) / 9e6 < 0.01
+    g, _ = grid_attribute(proj, "thickness:4", cell=100, boundary=b)
+    assert g.coverage is not None and g.coverage < 1
+    assert abs(g.valid.sum() * 100 ** 2 - b.area) / b.area < 0.05
+    m = build_model(proj, cell=100, dz=1.0, boundary=b)
+    area = (m.lith >= 0).any(0).sum() * 100 ** 2
+    assert abs(area - b.area) / b.area < 0.05
+    v = m.volumes().set_index("code")
+    assert abs(v.loc["4", "volume_m3"] / area - 10) < 1.0

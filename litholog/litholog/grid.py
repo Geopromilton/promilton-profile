@@ -81,6 +81,13 @@ class Grid:
     y: np.ndarray       # cell-centre y (ny,)
     z: np.ndarray       # values (ny, nx); NaN = masked
     cell: float
+    inside: np.ndarray | None = None   # exact study-area cells (for volumes/export)
+    boundary: object = None            # Boundary used for clipping, if any
+    coverage: float | None = None      # fraction of the study area inside the boreholes' hull
+
+    @property
+    def valid(self):
+        return np.isfinite(self.z) if self.inside is None else (self.inside & np.isfinite(self.z))
 
     @property
     def extent(self):
@@ -100,7 +107,8 @@ def make_axes(xs, ys, cell: float | None = None, margin: float = 0.05, target: i
     if not cell:
         raw = span * (1 + 2 * margin) / target
         mag = 10 ** np.floor(np.log10(raw))
-        cell = float(min((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)))
+        # nearest "round" size (log scale) to the target
+        cell = float(min((m * mag for m in (1, 2, 2.5, 5, 10)), key=lambda c: abs(np.log(c / raw))))
     gx = np.arange(np.floor(x0 / cell) * cell + cell / 2, x1 + cell, cell)
     gy = np.arange(np.floor(y0 / cell) * cell + cell / 2, y1 + cell, cell)
     return gx, gy, cell
@@ -203,19 +211,38 @@ def _ordinary_kriging(px, py, pv, tx, ty):
 
 
 def grid_attribute(project: Project, attr: str, method: str = "idw", cell: float | None = None,
-                   mask: str = "hull", buffer: float = 0.0):
-    """Grid one attribute. Returns (Grid, borehole value table)."""
+                   mask: str = "hull", buffer: float = 0.0, boundary=None):
+    """Grid one attribute. Returns (Grid, borehole value table).
+
+    With a ``boundary`` the grid covers and is clipped to the study area
+    (values outside the boreholes' hull are extrapolated).
+    """
     vals = borehole_values(project, attr)
     allxy = project.boreholes.dropna(subset=["x", "y"])
     good = vals.dropna(subset=["x", "y", "value"])
     if len(good) < 2:
         raise ValueError(f"'{attr}': fewer than two boreholes have a value")
+    if boundary is not None:
+        x0, x1, y0, y1 = boundary.bbox
+        gx, gy, cell = make_axes(np.r_[allxy["x"], x0, x1], np.r_[allxy["y"], y0, y1], cell, margin=0.02)
+        z = interpolate(good["x"], good["y"], good["value"], gx, gy, method)
+        inside = boundary.mask(gx, gy)
+        z = np.where(boundary.mask(gx, gy, 2 * cell), z, np.nan)  # margin keeps edge contours smooth
+        cov = coverage(allxy["x"], allxy["y"], gx, gy, inside)
+        return Grid(gx, gy, z, cell, inside, boundary, cov), vals
     gx, gy, cell = make_axes(allxy["x"], allxy["y"], cell)
     z = interpolate(good["x"], good["y"], good["value"], gx, gy, method)
     if mask == "hull" and len(good) >= 3 and not _nearly_collinear(good["x"], good["y"]):
         # A two-cell margin keeps contours smooth up to the hull; maps clip to the exact hull.
         z = np.where(hull_mask(good["x"], good["y"], gx, gy, buffer or 2 * cell), z, np.nan)
     return Grid(gx, gy, z, cell), vals
+
+
+def coverage(px, py, gx, gy, inside) -> float | None:
+    """Share of the study-area cells that lie inside the boreholes' convex hull."""
+    if len(px) < 3 or _nearly_collinear(px, py) or not inside.any():
+        return None
+    return float((hull_mask(px, py, gx, gy) & inside).sum() / inside.sum())
 
 
 def _nearly_collinear(px, py) -> bool:
@@ -235,7 +262,7 @@ def write_ascii_grid(grid: Grid, path, nodata: float = -9999.0) -> Path:
     """ESRI ASCII grid (.asc): opens in QGIS, ArcGIS, Surfer, GRASS."""
     path = Path(path)
     x0, _, y0, _ = grid.extent
-    data = np.where(np.isnan(grid.z), nodata, grid.z)[::-1]  # north row first
+    data = np.where(grid.valid, grid.z, nodata)[::-1]  # north row first
     with open(path, "w") as f:
         f.write(f"ncols {len(grid.x)}\nnrows {len(grid.y)}\n")
         f.write(f"xllcorner {x0:.3f}\nyllcorner {y0:.3f}\ncellsize {grid.cell:g}\n")

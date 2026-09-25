@@ -38,6 +38,8 @@ class BlockModel:
     lith: np.ndarray     # (nz, ny, nx) int index into ``codes``; -1 = empty
     codes: list
     expected: np.ndarray | None = None  # (ncodes,) probability-weighted voxel counts
+    boundary: object = None             # study-area Boundary, if the model was clipped to one
+    coverage: float | None = None       # share of the model area inside the boreholes' hull
 
     @property
     def voxel_volume(self):
@@ -73,7 +75,7 @@ class BlockModel:
 
 def build_model(project: Project, cell: float | None = None, dz: float | None = None,
                 power: float = 2.0, target: int = 70, datum: str = "depth",
-                max_voxels: int = 3_000_000) -> BlockModel:
+                max_voxels: int = 3_000_000, boundary=None) -> BlockModel:
     """Indicator-IDW lithology model.
 
     ``datum="depth"`` (default) compares holes at the same depth below ground, so
@@ -92,7 +94,11 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
     hy = np.array([b.y for b, _ in holes], float)
     tops = np.array([us[0].top for _, us in holes])
     bots = np.array([us[-1].bot for _, us in holes])
-    gx, gy, cell = make_axes(hx, hy, cell, target=target)
+    if boundary is not None:  # model covers the study area (and every borehole)
+        bx0, bx1, by0, by1 = boundary.bbox
+        gx, gy, cell = make_axes(np.r_[hx, bx0, bx1], np.r_[hy, by0, by1], cell, margin=0.01, target=target)
+    else:
+        gx, gy, cell = make_axes(hx, hy, cell, target=target)
     zlo, zhi = float(bots.min()), float(tops.max())
     if not dz:  # fine enough to keep thin layers: half the 10th-percentile layer thickness
         thick = np.array([u.thick for _, us in holes for u in us])
@@ -106,7 +112,16 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
     cidx = {c: k for k, c in enumerate(codes)}
     ground = interpolate(hx, hy, tops, gx, gy, "linear")
     base = interpolate(hx, hy, bots, gx, gy, "linear")
-    inside = hull_mask(hx, hy, gx, gy, cell) if len(holes) >= 3 else np.ones(ground.shape, bool)
+    cov = None
+    if boundary is not None:
+        from .grid import coverage
+
+        inside = boundary.mask(gx, gy)
+        cov = coverage(hx, hy, gx, gy, inside)
+    elif len(holes) >= 3:
+        inside = hull_mask(hx, hy, gx, gy, cell)
+    else:
+        inside = np.ones(ground.shape, bool)
 
     X, Y = np.meshgrid(gx, gy)
     d = np.hypot(X.ravel()[:, None] - hx[None], Y.ravel()[:, None] - hy[None])
@@ -150,7 +165,7 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
         keep &= layer >= 0
         lith[k] = np.where(keep, layer, -1)
         expected += p[keep].sum(0)
-    return BlockModel(gx, gy, gz, cell, dz, lith, codes, expected)
+    return BlockModel(gx, gy, gz, cell, dz, lith, codes, expected, boundary, cov)
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +240,10 @@ def model_view(model: BlockModel, legend: Legend, path, only=None, cutaway: bool
         X, Y = np.meshgrid(model.x, model.y)
         ax.plot_wireframe(X, Y, top * ve, rstride=max(1, len(model.y) // 12),
                           cstride=max(1, len(model.x) // 12), color="#999999", lw=0.3)
+    if model.boundary is not None:
+        for r in model.boundary.rings:
+            ax.plot(np.r_[r[:, 0], r[0, 0]], np.r_[r[:, 1], r[0, 1]], model.z[0] * ve,
+                    color="#8B0000", lw=0.9, zorder=0)
     ax.set_xlim(model.x[0], model.x[-1])
     ax.set_ylim(model.y[0], model.y[-1])
     ax.set_zlim(model.z[0] * ve, model.z[-1] * ve)
@@ -279,10 +298,21 @@ def model_view(model: BlockModel, legend: Legend, path, only=None, cutaway: bool
         if has_sy and pd.notna(row.get("storage_mcm")):
             tax.text(1.0, yy, f"{row['storage_mcm']:,.2f}", fontsize=6.3, va="center", ha="right",
                      color="#0B3C5D", fontweight="bold")
-    note = "MCM = million m³. Volumes are within the boreholes' convex hull, from ground to base of drilling."
+    if model.boundary is not None:
+        area = (model.lith >= 0).any(0).sum() * model.cell ** 2 / 1e6
+        note = (f"MCM = million m³. Volumes are within the study-area boundary ({area:,.1f} km² of voxels; "
+                f"polygon {model.boundary.area / 1e6:,.1f} km²), from ground to base of drilling.")
+        if model.coverage is not None and model.coverage < 0.999:
+            note += (f"\n{100 * (1 - model.coverage):.0f} % of the area lies beyond the boreholes; "
+                     "values there are extrapolated.")
+    else:
+        note = "MCM = million m³. Volumes are within the boreholes' convex hull, from ground to base of drilling."
     if has_sy:
         note += "\n*Storage = volume × specific yield given by the user (an estimate, not a measurement)."
-    tax.text(0, n + 3.4, note, fontsize=5.5, color="#555555", va="top", wrap=True)
+    import textwrap
+
+    note = "\n".join(textwrap.fill(par, 78) for par in note.split("\n"))
+    tax.text(0, n + 3.4, note, fontsize=5.5, color="#555555", va="top")
     fig.text(0.02, 0.015, f"LithoLog {__version__} · indicator inverse-distance lithology model; "
                           "interpretive between boreholes", fontsize=6, color="#777777")
     path = Path(path)
@@ -320,6 +350,8 @@ def slices_figure(model: BlockModel, legend: Legend, path, levels=None, title: s
         ax.imshow(model.lith[k] + 1, origin="lower", extent=ext, cmap=cmap, vmin=0,
                   vmax=len(model.codes), interpolation="nearest")
         ax.set_title(f"Elevation {model.z[k]:.0f} m", fontsize=8, fontweight="bold")
+        if model.boundary is not None:
+            ax.add_patch(model.boundary.patch(ax, facecolor="none", edgecolor="#8B0000", lw=0.8))
         ax.tick_params(labelsize=5)
         ax.ticklabel_format(useOffset=False, style="plain")
         ax.set_aspect("equal")

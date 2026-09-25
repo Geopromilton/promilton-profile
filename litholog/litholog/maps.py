@@ -94,7 +94,12 @@ def map_figure(grid: Grid, vals: pd.DataFrame, attr: str, legend=None, method: s
     # Smooth map edge: clip the contours to the convex hull of the data boreholes.
     from .grid import _nearly_collinear
 
-    if len(good) >= 3 and np.isnan(grid.z).any() and not _nearly_collinear(good["x"], good["y"]):
+    if grid.boundary is not None:  # clip to the study-area boundary
+        for artist in (cf, cs, quiver):
+            if artist is not None:
+                artist.set_clip_path(grid.boundary.patch(ax))
+        ax.add_patch(grid.boundary.patch(ax, facecolor="none", edgecolor="#8B0000", lw=1.1, zorder=3.5))
+    elif len(good) >= 3 and np.isnan(grid.z).any() and not _nearly_collinear(good["x"], good["y"]):
         from matplotlib.patches import Polygon as MplPolygon
         from scipy.spatial import ConvexHull
 
@@ -142,23 +147,31 @@ def map_figure(grid: Grid, vals: pd.DataFrame, attr: str, legend=None, method: s
         ("Cell size", f"{grid.cell:g} m"),
         ("Contour interval", f"{levels[1] - levels[0]:g} {unit}"),
     ]
+    if grid.boundary is not None:
+        lines.append(("Study area", f"{grid.boundary.area / 1e6:,.1f} km²"))
+        if grid.coverage is not None:
+            lines.append(("Beyond borehole cover", f"{100 * (1 - grid.coverage):.0f} % (extrapolated)"))
     if kind == "thickness":  # isopach volume within the mapped area
-        vol = float(np.nansum(grid.z)) * grid.cell ** 2
+        vol = float(np.nansum(np.where(grid.valid, grid.z, np.nan))) * grid.cell ** 2
         lines.append(("Volume (isopach)", f"{vol / 1e6:,.1f} MCM"))
     info.text(0, 0.02, "Summary", fontsize=8, fontweight="bold", va="top")
     for i, (k, v) in enumerate(lines):
-        yy = 0.14 + i * 0.1
+        yy = 0.12 + i * 0.075
         info.text(0, yy, k, fontsize=6.5, color="#555555", va="top")
         info.text(0.48, yy, v, fontsize=6.5, color=INK, va="top")
     note = "Arrows: groundwater flow direction (down gradient)" if arrows else ""
     if n_ok < n_all:
         note += ("\n" if note else "") + "Open circles: boreholes without this value"
-    info.text(0, 0.9, note, fontsize=6, color="#555555", va="top")
+    if grid.boundary is not None:
+        note += ("\n" if note else "") + f"Red line: study-area boundary ({grid.boundary.name})"
+    info.text(0, 0.15 + len(lines) * 0.075, note, fontsize=6, color="#555555", va="top")
 
     fax = axes_mm(m, H - m - 5, W - 2 * m, 5)
     fax.set_axis_off()
+    limit = ("map clipped to the study-area boundary" if grid.boundary is not None
+             else "map limited to the area enclosed by the boreholes")
     fax.text(0, 0.5, f"LithoLog {__version__} · interpolated surface; reliability decreases away from "
-                     "boreholes · map limited to the area enclosed by the boreholes", fontsize=6,
+                     f"boreholes · {limit}", fontsize=6,
              color="#777777", va="center")
     return fig
 

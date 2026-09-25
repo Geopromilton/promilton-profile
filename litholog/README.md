@@ -127,6 +127,23 @@ horizontal slices, `volumes.csv`, and `model.vtk` for ParaView.
 
 ![Block model](docs/model_demo.png)
 
+## Study-area boundary (shapefile)
+
+```bash
+litholog map   data.xlsx -a thickness:FRAC --boundary study_area.shp
+litholog model data.xlsx --sy FRAC=0.015 --boundary study_area.shp
+```
+
+Maps and the block model then cover and are clipped to the polygon (multi-part polygons and holes
+are supported), volumes and storage are totalled inside it, and the outline is drawn on maps, slices
+and 3D views. The share of the study area lying beyond the boreholes (where values are extrapolated)
+is reported.
+
+The shapefile's `.prj` is used to reproject the boundary into the boreholes' coordinates. Give the
+boreholes' system with `--crs EPSG:32643`; if you don't and the boundary is in a UTM zone that does
+not overlap the boreholes, the neighbouring UTM zone that does is used (and reported) — a common
+mix-up near zone edges.
+
 ## Commands
 
 ```
@@ -135,8 +152,8 @@ litholog validate DATA                       check for overlaps, gaps, bad depth
 litholog striplog DATA [-o DIR] [-f pdf|png|svg] [-b BH1 BH2] [-m 50] [--title NAME]
 litholog section DATA (-b IDS | --line X,Y ... | -s FILE) [--ve N] [--page A3|A4]
 litholog fence DATA [--network mst|delaunay|sections] [--views N] [-o fence.pdf]
-litholog map DATA -a ATTR ... [-m idw|linear|kriging] [--cell M]
-litholog model DATA [--datum depth|elevation] [--sy CODE=SY ...] [--only CODE ...]
+litholog map DATA -a ATTR ... [-m idw|linear|kriging] [--cell M] [--boundary SHP [--crs EPSG]]
+litholog model DATA [--datum depth|elevation] [--sy CODE=SY ...] [--only CODE ...] [--boundary SHP]
 litholog convert DATA [OUT.xlsx] [-l LEGEND] turn GMS text / CSV folder into a workbook
 litholog legend [DATA] [-o legend.pdf]       list / draw the lithology legend
 

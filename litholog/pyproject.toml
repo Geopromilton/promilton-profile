@@ -9,7 +9,7 @@ description = "Open-source borehole strip logs, cross-sections, fence diagrams a
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
-dependencies = ["numpy", "pandas", "matplotlib>=3.5", "openpyxl", "scipy"]
+dependencies = ["numpy", "pandas", "matplotlib>=3.5", "openpyxl", "scipy", "pyshp", "pyproj"]
 keywords = ["borehole", "lithology", "hydrogeology", "geology", "strip log", "well log"]
 classifiers = [
     "Programming Language :: Python :: 3",
