@@ -59,6 +59,10 @@ class Viewer3D(QWidget):
         self.look = dict(DEFAULT_LOOK)
         self._fs = 1.0           # line scale (> 1 while rendering a print-size image)
         self._ts = 1.0           # text scale
+        self.label_size = 13     # borehole labels (px on screen)
+        self.scene_state = {}    # (kind, key) -> {"visible", "color", "opacity", "width"} from the Project tree
+        self.bh_actors, self.bh_labels = {}, {}
+        self.axis_size = 12      # axis numbers (px on screen); titles are 2 px larger
         self._draws = []         # drawing calls to replay for print-size export
         # Multisample anti-aliasing keeps text sharp (FXAA blurs labels and axis numbers).
         for kind, kw in (("msaa", {"multi_samples": 8}), ("ssaa", {})):
@@ -228,14 +232,19 @@ class Viewer3D(QWidget):
         blocks = pv.MultiBlock()
         colors = []
         tops = []
+        radius *= self.scene_state.get(("boreholes", ""), {}).get("width", 1.0)
+        owners = []
         for bid, x, y, us in holes:
             for u in us:
                 seg = pv.Line((x, y, u.top * ve), (x, y, u.bot * ve)).tube(radius=radius, n_sides=14)
                 blocks.append(seg)
                 colors.append(legend.get(u.code).color)
+                owners.append(bid)
             tops.append((bid, (x, y, us[0].top * ve + span * 0.004)))
-        for k, (seg, col) in enumerate(zip(blocks, colors)):
-            p.add_mesh(seg, color=col, smooth_shading=True, name=f"bh_{k}", ambient=0.3, specular=0.3)
+        self.bh_actors, self.bh_labels = {}, {}
+        for k, (seg, col, bid) in enumerate(zip(blocks, colors, owners)):
+            a = p.add_mesh(seg, color=col, smooth_shading=True, name=f"bh_{k}", ambient=0.3, specular=0.3)
+            self.bh_actors.setdefault(bid, []).append(a)
         if labels and tops:
             import vtk
 
@@ -245,10 +254,11 @@ class Viewer3D(QWidget):
                 t.SetInput(str(bid))
                 t.SetPosition(*xyz)
                 tp = t.GetTextProperty()
-                render.style_text(tp, size=13 * self._ts, bold=True, color=fg)
+                render.style_text(tp, size=self.label_size * self._ts, bold=True, color=fg)
                 tp.SetJustificationToCentered()
                 tp.SetVerticalJustificationToBottom()
                 p.add_actor(t, name=f"bh_label_{k}", reset_camera=False)
+                self.bh_labels[bid] = t
             self.extras["labels"] = True
 
     def _grid(self, model, ve):
@@ -260,7 +270,7 @@ class Viewer3D(QWidget):
         b = p.bounds
         fg = self._fg()
         g = self.extras["grid"] = p.show_grid(
-            color=fg, font_size=int(12 * self._ts), xtitle="Easting (m)", ytitle="Northing (m)",
+            color=fg, font_size=int(self.axis_size * self._ts), xtitle="Easting (m)", ytitle="Northing (m)",
             ztitle=f"Elevation (m), VE {ve:g}x", n_xlabels=5, n_ylabels=5, n_zlabels=5, fmt="%.0f",
             location="outer", ticks="outside", minor_ticks=False,
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
@@ -270,17 +280,17 @@ class Viewer3D(QWidget):
             # font size (VTK axis scaling), so it is scaled down to match the chosen point size
             fs, ts = self._fs, (self._ts if self._ts == 1.0 else self._ts * 0.55)
             g.SetScreenSize(12)          # text size comes from the font size alone
-            g.SetLabelOffset(8 * ts)
+            g.SetLabelOffset(8 * ts * self.axis_size / 12)
             try:
-                g.SetTitleOffset((22 * ts, 22 * ts))   # VTK >= 9.3 takes (x, y)
+                g.SetTitleOffset((22 * ts * self.axis_size / 12, 22 * ts * self.axis_size / 12))   # VTK >= 9.3 takes (x, y)
             except TypeError:
                 g.SetTitleOffset(22 * ts)
             for ax in "XYZ":
                 getattr(g, f"Get{ax}AxesLinesProperty")().SetLineWidth(1.5 * fs)
                 getattr(g, f"Get{ax}AxesGridlinesProperty")().SetLineWidth(fs)
             for i in range(3):
-                render.style_text(g.GetTitleTextProperty(i), size=14 * ts, bold=True, color=fg)
-                render.style_text(g.GetLabelTextProperty(i), size=12 * ts, color=fg, weight="medium")
+                render.style_text(g.GetTitleTextProperty(i), size=(self.axis_size + 2) * ts, bold=True, color=fg)
+                render.style_text(g.GetLabelTextProperty(i), size=self.axis_size * ts, color=fg, weight="medium")
         except Exception:  # noqa: BLE001 - older VTK
             pass
 
@@ -418,6 +428,93 @@ class Viewer3D(QWidget):
             self.message.emit(f"Ambient occlusion is not supported by this graphics driver ({e}).")
         p.render()
 
+    # ------------------------------------------------------------------ scene items (Project tree)
+    def scene_actors(self, kind, key=""):
+        """The VTK actors drawing one scene item."""
+        acts = self.plotter.renderer.actors
+        if kind == "borehole":
+            return list(self.bh_actors.get(key, [])) + ([self.bh_labels[key]] if key in self.bh_labels else [])
+        if kind == "boreholes":
+            return [a for v in self.bh_actors.values() for a in v]
+        if kind == "labels":
+            return list(self.bh_labels.values())
+        prefix = {"boundary": "boundary", "terrain": "terrain", "constraint": f"constraint_{key}",
+                  "surface": key}.get(kind)
+        if prefix is None:
+            return []
+        return [a for n, a in acts.items() if n == prefix or (kind == "boundary" and n.startswith("boundary"))]
+
+    def apply_scene(self, state=None, render_now=True):
+        """Visibility, colour, opacity and width of every scene item (kept across redraws and exports)."""
+        state = self.scene_state if state is None else state
+        from PySide6.QtGui import QColor
+
+        for (kind, key), st in state.items():
+            if kind == "grid":
+                continue
+            if kind == "axes":
+                try:
+                    (self.plotter.show_axes if st.get("visible", True) else self.plotter.hide_axes)()
+                    if st.get("visible", True):
+                        self._orientation_axes()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            if kind == "legend":
+                self.legend.set_enabled_bar(st.get("visible", True))
+                continue
+            for a in self.scene_actors(kind, key):
+                if "visible" in st:
+                    a.SetVisibility(bool(st["visible"]))
+                prop = a.GetProperty() if hasattr(a, "GetProperty") else None
+                if prop is None:
+                    continue
+                if st.get("color") and kind not in ("borehole", "boreholes"):
+                    c = QColor(st["color"])
+                    try:
+                        prop.SetColor(c.redF(), c.greenF(), c.blueF())
+                    except TypeError:
+                        pass
+                if "opacity" in st and hasattr(prop, "SetOpacity"):
+                    prop.SetOpacity(float(st["opacity"]))
+                if "width" in st and kind in ("boundary", "constraint") and hasattr(prop, "SetLineWidth"):
+                    prop.SetLineWidth(float(st["width"]) * self._fs)
+            if kind == "labels":
+                for t in self.bh_labels.values():
+                    tp = t.GetTextProperty()
+                    if st.get("color"):
+                        c = QColor(st["color"])
+                        tp.SetColor(c.redF(), c.greenF(), c.blueF())
+        # a hidden borehole also hides its label
+        for (kind, key), st in state.items():
+            if kind == "borehole" and not st.get("visible", True) and key in self.bh_labels:
+                self.bh_labels[key].SetVisibility(False)
+        if render_now:
+            self.plotter.render()
+
+    def set_scene(self, kind, key="", **props):
+        st = self.scene_state.setdefault((kind, key), {})
+        st.update(props)
+        if kind == "grid" and "visible" in props:
+            self.set_axes_grid(bool(props["visible"]))
+            return
+        if kind == "boreholes" and "width" in props:
+            return     # tube size: applied when the model is redrawn
+        self.apply_scene({(kind, key): st})
+
+    def set_text_sizes(self, label=None, axis=None):
+        """Borehole-label and axis text sizes (on screen; exports scale them to the chosen point size)."""
+        if label:
+            self.label_size = float(label)
+            for name, actor in list(self.plotter.renderer.actors.items()):
+                if name.startswith("bh_label_"):
+                    actor.GetTextProperty().SetFontSize(int(round(self.label_size)))
+        if axis:
+            self.axis_size = float(axis)
+            if self._model is not None:
+                self._grid(self._model, self.ve)
+        self.plotter.render()
+
     def set_axes_grid(self, on: bool):
         self.show_axes_grid = on
         if self._model is not None:
@@ -552,6 +649,7 @@ class Viewer3D(QWidget):
         try:
             self.plotter, self._fs = off, W / max(w, 1)
             self._ts = text_scale or self._fs
+            saved_bh = (self.bh_actors, self.bh_labels)
             self.units, self.unit_code, self.unit_hz, self.edges, self.extras = {}, {}, {}, {}, {}
             self._clip_plane = None
             bottom, top = self._bg_colors()
@@ -560,6 +658,7 @@ class Viewer3D(QWidget):
                 getattr(self, name)(*args, **kw)
             self._orientation_axes()
             self._apply_visibility(render=False)
+            self.apply_scene(render_now=False)
             opac = saved["units"]
             for key, a in self.units.items():
                 if key in opac:
@@ -573,6 +672,8 @@ class Viewer3D(QWidget):
             arr = off.screenshot(None, return_img=True, transparent_background=transparent)
         finally:
             self.plotter, self._fs, self._ts = src, 1.0, 1.0
+            if "saved_bh" in locals():
+                self.bh_actors, self.bh_labels = saved_bh
             for k, v in saved.items():
                 setattr(self, k, v)
             off.close()
@@ -599,7 +700,7 @@ class Viewer3D(QWidget):
 
         Image.MAX_IMAGE_PIXELS = None
         # text_pt: printed size of the labels in points (1 pt = 1/72 inch); axis text keeps its proportion
-        ts = (text_pt / 72 * dpi) / self.LABEL_PX if text_pt else None
+        ts = (text_pt / 72 * dpi) / self.label_size if text_pt else None
         img = Image.fromarray(self._render_large(int(width_px), transparent, ts))
         if legend and self.legend.isVisible() and self.legend.items:
             from PySide6.QtCore import QBuffer, QIODevice

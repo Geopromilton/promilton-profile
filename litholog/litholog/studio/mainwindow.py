@@ -235,6 +235,8 @@ class MainWindow(QMainWindow):
         t.setIndentation(14)
         t.itemChanged.connect(self._tree_changed)
         t.itemDoubleClicked.connect(self._tree_double)
+        t.setContextMenuPolicy(Qt.CustomContextMenu)
+        t.customContextMenuRequested.connect(self._tree_menu)
         self._dock("Project", t, Qt.LeftDockWidgetArea).setMinimumWidth(270)
         self._refresh_tree()
 
@@ -315,6 +317,16 @@ class MainWindow(QMainWindow):
         f.addRow("Vertical exaggeration", self.p_ve)
         f.addRow("Opacity", self.p_opacity)
         f.addRow("Cut-away", self.p_cut)
+        self.p_labsize = QDoubleSpinBox(minimum=6, maximum=40, decimals=0, suffix=" px")
+        self.p_labsize.setValue(13)
+        self.p_labsize.setToolTip("Size of the borehole names in the 3D view")
+        self.p_axsize = QDoubleSpinBox(minimum=6, maximum=40, decimals=0, suffix=" px")
+        self.p_axsize.setValue(12)
+        self.p_axsize.setToolTip("Size of the axis numbers (axis titles are 2 px larger)")
+        f.addRow("Borehole name size", self.p_labsize)
+        f.addRow("Axis text size", self.p_axsize)
+        self.p_labsize.valueChanged.connect(lambda v: self.viewer.set_text_sizes(label=v))
+        self.p_axsize.valueChanged.connect(lambda v: self.viewer.set_text_sizes(axis=v))
         row = QHBoxLayout()
         for c in (self.p_holes, self.p_labels, self.p_bnd):
             row.addWidget(c)
@@ -434,6 +446,7 @@ class MainWindow(QMainWindow):
             if not after:  # new data (not a project file): start with a clean layer set-up
                 self.dem, self.dem_path, self.layer_state, self._legend_rows = None, None, {}, {}
                 self.constraints, self.constraints_path = None, None
+                self.viewer.scene_state = {}
                 self.p_usedem.setEnabled(False)
                 self.p_rectify.setEnabled(False)
             self.legend_path = legend
@@ -470,7 +483,8 @@ class MainWindow(QMainWindow):
                 "use_dem": self.p_usedem.isChecked(), "rectify": self.p_rectify.isChecked(),
                 "layers": self.layer_state, "legend_rows": list(getattr(self, "_legend_rows", {}).values()),
                 "legend_title": self.viewer.legend.title, "background": self.viewer.background,
-                "look": self.viewer.look, "influence": self.interp.__dict__, "constraints": self.constraints_path, "horizons_visible": {str(k): v for k, v in self.hz_state.items()}}
+                "look": self.viewer.look,
+                "scene": [[k[0], k[1], v] for k, v in self.viewer.scene_state.items()], "label_size": self.p_labsize.value(), "axis_size": self.p_axsize.value(), "influence": self.interp.__dict__, "constraints": self.constraints_path, "horizons_visible": {str(k): v for k, v in self.hz_state.items()}}
 
     def apply_settings(self, st: dict):
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
@@ -496,6 +510,12 @@ class MainWindow(QMainWindow):
         self.viewer.legend.title = st.get("legend_title", "Lithology")
         if st.get("background"):
             self.set_bg(st["background"])
+        for w, k, d in ((self.p_labsize, "label_size", 13), (self.p_axsize, "axis_size", 12)):
+            w.blockSignals(True)
+            w.setValue(st.get(k, d))
+            w.blockSignals(False)
+        self.viewer.label_size, self.viewer.axis_size = self.p_labsize.value(), self.p_axsize.value()
+        self.viewer.scene_state = {(k, key): v for k, key, v in st.get("scene", [])}
         if st.get("look"):
             self.viewer.look.update(st["look"])
             lk = self.viewer.look
@@ -616,12 +636,27 @@ class MainWindow(QMainWindow):
             return
         root = QTreeWidgetItem(t, [self.project.name])
         root.setIcon(0, theme.icon("mdi6.briefcase-outline", theme.ACCENT))
+        sc = self.viewer.scene_state
+
+        def scene_vis(kind, key=""):
+            return Qt.Checked if sc.get((kind, key), {}).get("visible", True) else Qt.Unchecked
+
+        def checkable(item, tag, kind, key=""):
+            item.setData(0, Qt.UserRole, tag)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, scene_vis(kind, key))
+
         bh = QTreeWidgetItem(root, [f"Boreholes ({len(self.project.ids)})"])
         bh.setIcon(0, theme.icon("mdi6.format-list-bulleted", theme.TEXT_DIM))
+        bh.setFlags(bh.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+        bh.setData(0, Qt.UserRole, ("scene", "boreholes", ""))
+        bh.setToolTip(0, "Tick to show / hide boreholes in 3D · right-click for properties")
         for bid in self.project.ids:
             it = QTreeWidgetItem(bh, [bid])
             it.setIcon(0, theme.icon("mdi6.circle-medium", theme.ACCENT_2))
-            it.setData(0, Qt.UserRole, ("borehole", bid))
+            checkable(it, ("borehole", bid), "borehole", bid)
+            it.setToolTip(0, "Tick: show in 3D · double-click: strip log · right-click: more")
+        _sync_parent(bh)
         lg = QTreeWidgetItem(root, ["Lithology legend"])
         lg.setIcon(0, theme.icon("mdi6.palette-outline", theme.TEXT_DIM))
         used = list(dict.fromkeys(c for c in self.project.lithology["code"] if c))
@@ -634,12 +669,17 @@ class MainWindow(QMainWindow):
         if self.boundary is not None:
             it = QTreeWidgetItem(root, [f"Study area · {self.boundary.area / 1e6:,.1f} km²"])
             it.setIcon(0, theme.icon("mdi6.vector-polygon", "#E0524F"))
+            checkable(it, ("scene", "boundary", ""), "boundary")
         if self.dem is not None:
             z = self.dem.z
             import numpy as np
 
             it = QTreeWidgetItem(root, [f"DEM {self.dem.name} · {np.nanmin(z):.0f}–{np.nanmax(z):.0f} m"])
             it.setIcon(0, theme.icon("mdi6.terrain", "#6AAF6A"))
+            it.setData(0, Qt.UserRole, ("scene", "terrain", ""))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(0, Qt.Checked if self.ribbon.buttons["sh_terrain"].isChecked() else Qt.Unchecked)
+            it.setToolTip(0, "Tick to show the terrain around the model")
         if self.model is not None:
             mu = QTreeWidgetItem(root, ["3D model units"])
             mu.setIcon(0, theme.icon("mdi6.cube-outline", theme.TEXT_DIM))
@@ -671,12 +711,46 @@ class MainWindow(QMainWindow):
                 _sync_parent(hz)
         if self.model is not None:
             _sync_parent(mu)
+            scn = QTreeWidgetItem(root, ["3D scene"])
+            scn.setIcon(0, theme.icon("mdi6.eye-settings-outline", theme.TEXT_DIM))
+            items = [("Borehole names", "labels", "", "mdi6.label-outline")]
+            for name in [n for n in self.viewer.extras if n in ("water_table",)]:
+                items.append(("Water table", "surface", name, "mdi6.water"))
+            if self.constraints is not None:
+                for k, c in enumerate(self.constraints.items):
+                    items.append((f"Constraint: {c.name or (c.target.upper() + ' ' + c.kind)}", "constraint", str(k),
+                                  "mdi6.vector-polyline-edit"))
+            items += [("Axes grid", "grid", "", "mdi6.axis-arrow-info"), ("N / E / Up marker", "axes", "", "mdi6.compass"),
+                      ("Legend bar", "legend", "", "mdi6.format-list-bulleted-type")]
+            for label, kind, key, ic in items:
+                it = QTreeWidgetItem(scn, [label])
+                it.setIcon(0, theme.icon(ic, theme.TEXT_DIM))
+                checkable(it, ("scene", kind, key), kind, key)
+                it.setToolTip(0, "Tick to show / hide · right-click for properties")
         t.expandAll()
         bh.setExpanded(len(self.project.ids) <= 30)
         t.blockSignals(False)
 
     def _tree_changed(self, item, col):
         tag = item.data(0, Qt.UserRole)
+        on = item.checkState(0) == Qt.Checked
+        if tag and tag[0] == "borehole":
+            self.viewer.set_scene("borehole", tag[1], visible=on)
+            return
+        if tag and tag[0] == "scene":
+            kind, key = tag[1], tag[2]
+            if kind == "boreholes":
+                return        # the children carry the state
+            if kind == "terrain":
+                self.ribbon.buttons["sh_terrain"].setChecked(on)
+                self.toggle_terrain(on)
+                return
+            if kind == "grid":
+                self.ribbon.buttons["sh_grid"].setChecked(on)
+            if kind == "legend":
+                self.ribbon.buttons["sh_legend"].setChecked(on)
+            self.viewer.set_scene(kind, key, visible=on)
+            return
         if tag and tag[0] == "horizon":
             vis = item.checkState(0) == Qt.Checked
             self.hz_state[tag[1]] = vis
@@ -696,6 +770,49 @@ class MainWindow(QMainWindow):
             self.layer_properties(tag[1])
         elif tag and tag[0] == "horizon":
             self.layer_properties(tag[2])
+
+    def _tree_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+
+        item = self.tree.itemAt(pos)
+        tag = item.data(0, Qt.UserRole) if item else None
+        if not tag:
+            return
+        m = QMenu(self)
+        if tag[0] in ("unit", "legend", "horizon"):
+            m.addAction(theme.icon("mdi6.palette-outline"), "Layer properties…",
+                        lambda: self.layer_properties(tag[2] if tag[0] == "horizon" else tag[1]))
+        if tag[0] == "borehole":
+            m.addAction(theme.icon("mdi6.format-list-text"), "Strip log", lambda: self.show_striplog(bid=tag[1]))
+        if tag[0] == "scene" or tag[0] == "borehole":
+            kind, key = (("borehole", tag[1]) if tag[0] == "borehole" else (tag[1], tag[2]))
+            if kind not in ("grid", "axes", "legend", "terrain", "borehole"):
+                m.addAction(theme.icon("mdi6.tune"), "Properties…", lambda: self.scene_properties(kind, key, item.text(0)))
+        parent = item.parent()
+        if parent is not None and item.flags() & Qt.ItemIsUserCheckable and parent.flags() & Qt.ItemIsAutoTristate:
+            def only():
+                for k in range(parent.childCount()):
+                    c = parent.child(k)
+                    c.setCheckState(0, Qt.Checked if c is item else Qt.Unchecked)
+
+            def show_all():
+                for k in range(parent.childCount()):
+                    parent.child(k).setCheckState(0, Qt.Checked)
+
+            m.addSeparator()
+            m.addAction("Show only this", only)
+            m.addAction("Show all", show_all)
+        if not m.isEmpty():
+            m.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def scene_properties(self, kind, key, label):
+        st = self.viewer.scene_state.get((kind, key), {})
+        dlg = SceneItemDialog(label, kind, st, self)
+        if dlg.exec() == QDialog.Accepted:
+            props = dlg.values()
+            self.viewer.set_scene(kind, key, **props)
+            if kind in ("boreholes", "labels"):
+                self.redraw()
 
     def _set_unit_visible(self, code, vis):
         """From the legend bar: keep explorer, viewer and state in step."""
@@ -888,6 +1005,7 @@ class MainWindow(QMainWindow):
             self.viewer.show_terrain(self.dem, self.model, ve)
         if self.constraints is not None and getattr(self.model, "kind", "") == "horizon":
             self.viewer.show_constraints(self.constraints, self.model, ve)
+        self.viewer.apply_scene(render_now=False)
         self._update_legend()
         self.viewer.plotter.render()
         self.ribbon.buttons["clip"].setChecked(False)
@@ -1383,6 +1501,7 @@ class MainWindow(QMainWindow):
                                  label=f"Water table · {reading}")
         if self.p_opacity.value() > 45:  # see the water table through the solids
             self.p_opacity.setValue(40)
+        self._refresh_tree()
         self.log(f"Water table ({reading}) from {len(wt.wells)} wells{(' · ' + wells.note) if wells.note else ''}.")
         for _, r in v.iterrows():
             name = self.project.legend.get(r["code"]).name
@@ -2245,3 +2364,57 @@ class RechargeDialog(QDialog):
                 "draft": self.draft.value(), "other": self.other.value(),
                 "rainfall": self.rain.value() or None, "rif": self.rif.value() or None,
                 "surface": self.surface.currentData()}
+
+
+class SceneItemDialog(QDialog):
+    """Colour, opacity and line width / size of a 3D scene item."""
+
+    def __init__(self, label, kind, st, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QColorDialog
+
+        self.setWindowTitle(f"Properties · {label}")
+        f = QFormLayout(self)
+        self.color = st.get("color")
+        self.kind = kind
+        self.btn = QPushButton(self.color or "Default")
+        self._paint()
+
+        def pick():
+            c = QColorDialog.getColor(QColor(self.color or "#E0524F"), self, "Colour")
+            if c.isValid():
+                self.color = c.name()
+                self._paint()
+
+        self.btn.clicked.connect(pick)
+        self.opacity = QSlider(Qt.Horizontal, minimum=5, maximum=100)
+        self.opacity.setValue(int(round(100 * st.get("opacity", 1.0))))
+        self.width = QDoubleSpinBox(minimum=0.2, maximum=20, singleStep=0.5, decimals=1)
+        self.width.setValue(st.get("width", 3.0 if kind in ("boundary", "constraint") else 1.0))
+        if kind in ("boundary", "constraint", "surface", "labels"):
+            f.addRow("Colour", self.btn)
+        if kind != "labels":
+            f.addRow("Opacity", self.opacity)
+        if kind in ("boundary", "constraint"):
+            f.addRow("Line width (px)", self.width)
+        if kind == "boreholes":
+            self.width.setSuffix(" ×")
+            f.addRow("Tube thickness", self.width)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def _paint(self):
+        if self.color:
+            fg = "#1B1F26" if QColor(self.color).lightnessF() > 0.55 else "#FFFFFF"
+            self.btn.setStyleSheet(f"background: {self.color}; color: {fg}; font-weight: 600;")
+            self.btn.setText(self.color.upper())
+
+    def values(self):
+        v = {"opacity": self.opacity.value() / 100}
+        if self.color:
+            v["color"] = self.color
+        if self.kind in ("boundary", "constraint", "boreholes"):
+            v["width"] = self.width.value()
+        return v
