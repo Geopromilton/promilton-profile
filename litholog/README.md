@@ -21,6 +21,13 @@ shapefile), or try the demo data. Pages: **Overview** (location map, data check,
 rotate, standard views, volumes and storage with your specific yields) · **Help**. Every result can
 be downloaded (PDF, PNG, interactive HTML, ASCII grids, CSV, VTK).
 
+### Put the app online (free)
+
+On [Streamlit Community Cloud](https://share.streamlit.io): sign in with GitHub → **New app** →
+choose this repository, branch `main`, main file `streamlit_app.py` → **Deploy**. Anyone with the
+link can then use LithoLog in their browser. (PNG export of 3D views is not available there, as it
+needs Chrome; the interactive 3D view and all other downloads work.)
+
 ## Quick start (3 commands)
 
 ```bash

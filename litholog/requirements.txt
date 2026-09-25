@@ -1,0 +1,2 @@
+# Used by Streamlit Community Cloud to install LithoLog and the app.
+.[app]
