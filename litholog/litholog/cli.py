@@ -53,6 +53,9 @@ def main(argv=None) -> int:
                     help="hang holes by elevation (default) or from a flat ground surface")
     sc.add_argument("--title", help="project name printed in the title bar")
     sc.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
+    sc.add_argument("--style", default="section", choices=["section", "logs"],
+                    help="'logs' draws a log section (strip logs along the line)")
+    sc.add_argument("--curve", help="downhole parameter to plot beside each log (log sections)")
 
     fe = sub.add_parser("fence", help="draw a 3D fence diagram")
     fe.add_argument("data")
@@ -111,6 +114,55 @@ def main(argv=None) -> int:
     md.add_argument("--title", help="project name")
     md.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
 
+    aq = sub.add_parser("aquifer", help="water table from observation wells, saturated volume and storage")
+    aq.add_argument("data")
+    aq.add_argument("-w", "--wells", help="observation wells (CSV/Excel; X/Y or Lat/Lon; long or per-season "
+                                          "columns). Default: water levels in the borehole data")
+    aq.add_argument("-r", "--reading", nargs="+", help="which readings/seasons (default: all)")
+    aq.add_argument("--sy", nargs="+", metavar="CODE=SY", help="specific yield per unit, e.g. 4=0.015")
+    aq.add_argument("--crs", help="coordinate system of borehole X/Y (for lat/lon wells), e.g. EPSG:32643")
+    aq.add_argument("--boundary", help="study-area polygon shapefile")
+    aq.add_argument("--datum", default="depth", choices=["depth", "elevation"])
+    aq.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
+    aq.add_argument("-o", "--out", default="aquifer")
+    aq.add_argument("--title")
+    aq.add_argument("-l", "--legend")
+
+    pr = sub.add_parser("property", help="3D model of a downhole parameter (resistivity, EC, yield, ...)")
+    pr.add_argument("data")
+    pr.add_argument("-p", "--parameter", help="downhole parameter (default: list them)")
+    pr.add_argument("--anisotropy", type=float, help="horizontal/vertical range ratio (default: automatic)")
+    pr.add_argument("--scale", choices=["auto", "log", "linear"], default="auto")
+    pr.add_argument("--below", type=float, help="report the volume with values at or below this")
+    pr.add_argument("--above", type=float, help="report the volume with values at or above this")
+    pr.add_argument("--boundary")
+    pr.add_argument("--crs")
+    pr.add_argument("--datum", default="depth", choices=["depth", "elevation"])
+    pr.add_argument("-o", "--out", default="property")
+    pr.add_argument("--title")
+
+    stp = sub.add_parser("strat", help="stratigraphic (layer-cake) model from ordered formations")
+    stp.add_argument("data")
+    stp.add_argument("--order", nargs="+", required=True, metavar="CODE", help="formations, top to bottom")
+    stp.add_argument("--sy", nargs="+", metavar="CODE=SY")
+    stp.add_argument("--boundary")
+    stp.add_argument("--crs")
+    stp.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
+    stp.add_argument("-o", "--out", default="strat")
+    stp.add_argument("--title")
+    stp.add_argument("-l", "--legend")
+
+    ch = sub.add_parser("chem", help="hydrochemistry: Piper, Durov, Stiff, USSL, Wilcox, Gibbs, indices")
+    ch.add_argument("file", help="CSV/Excel: Sample, Ca, Mg, Na, K, HCO3, CO3, Cl, SO4, (NO3, EC, TDS, pH, Group)")
+    ch.add_argument("-o", "--out", default="chemistry")
+    ch.add_argument("--title", default="")
+
+    fr = sub.add_parser("fractures", help="fracture rose diagram, stereonet and frequency")
+    fr.add_argument("data")
+    fr.add_argument("-b", "--borehole", help="one borehole only (default: all)")
+    fr.add_argument("-o", "--out", default="fractures.pdf")
+    fr.add_argument("--title")
+
     sub.add_parser("studio", help="open LithoLog Studio, the desktop application")
 
     ap = sub.add_parser("app", help="open the LithoLog browser app")
@@ -125,7 +177,8 @@ def main(argv=None) -> int:
     return {"template": _template, "validate": _validate, "striplog": _striplog,
             "legend": _legend, "convert": _convert, "section": _section, "fence": _fence,
             "map": _map, "model": _model, "app": _app,
-            "studio": _studio}[a.cmd](a)
+            "studio": _studio, "aquifer": _aquifer, "property": _property, "strat": _strat,
+            "chem": _chem, "fractures": _fractures}[a.cmd](a)
 
 
 def _template(a):
@@ -257,7 +310,7 @@ def _section(a):
         return 2
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    kw = dict(ve=a.ve, page=a.page, title=a.title or project.name, datum=a.datum)
+    kw = dict(ve=a.ve, page=a.page, title=a.title or project.name, datum=a.datum, style=a.style, curve=a.curve)
     for line in lines:
         path = save_section(project, line, out / f"section_{_safe(line.name)}.{a.format}", **kw)
         print(f"  {path}  ({len(line.stations)} boreholes, {line.length:,.0f} m)")
@@ -390,6 +443,151 @@ def _boundary(a, project):
         if len(out):
             print(f"Note: {len(out)} borehole(s) lie outside the boundary: {', '.join(out['borehole_id'])}")
     return boundary
+
+
+def _sy(items):
+    sy = {}
+    for item in items or []:
+        code, _, val = item.partition("=")
+        sy[code.strip().upper()] = float(val)
+    return sy
+
+
+def _aquifer(a):
+    import numpy as np
+
+    from .aquifer import load_wells, saturated_thickness, saturated_volumes, water_table, wells_from_project
+    from .io import load_project
+    from .maps import save_map
+    from .model3d import build_model
+
+    project = load_project(a.data, legend=a.legend)
+    boundary = _boundary(a, project)
+    wells = load_wells(a.wells, crs=a.crs) if a.wells else wells_from_project(project)
+    if wells is None:
+        print("No water levels: give --wells, or fill the WaterLevels sheet.", file=sys.stderr)
+        return 2
+    if wells.note:
+        print(f"Wells: {wells.note}")
+    model = build_model(project, datum=a.datum, boundary=boundary)
+    sy = _sy(a.sy)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    title = a.title or project.name
+    readings = a.reading or wells.readings
+    tables = {}
+    for r in readings:
+        wt = water_table(model, wells, r, a.method)
+        vals = wt.wells.rename(columns={"well_id": "borehole_id"})
+        tag = _safe(str(r))
+        save_map(wt.grid, vals.assign(value=vals["wt"]), "water", out / f"water_table_{tag}.pdf",
+                 method=a.method, title=f"{title} · {r}")
+        save_map(wt.dtw, vals.assign(value=vals["dtw"]), "dtw", out / f"depth_to_water_{tag}.pdf",
+                 method=a.method, title=f"{title} · {r}")
+        v = saturated_volumes(model, wt, sy)
+        v.insert(1, "name", [project.legend.get(c).name for c in v["code"]])
+        v.to_csv(out / f"saturated_volumes_{tag}.csv", index=False)
+        tables[r] = v
+        for code in sy:
+            th = saturated_thickness(model, wt, code)
+            save_map(th, vals.assign(value=np.nan), f"thickness:{code}", out / f"saturated_thickness_{code}_{tag}.pdf",
+                     legend=project.legend, title=f"{title} · saturated · {r}")
+        print(f"\n{r}: {len(wt.wells)} wells, water table {np.nanmin(wt.grid.z):.1f}–{np.nanmax(wt.grid.z):.1f} m")
+        cols = ["code", "name", "volume_mcm", "saturated_mcm", "saturated_pct"] + (["storage_mcm"] if sy else [])
+        print(v[cols].round(1).to_string(index=False))
+    if len(readings) >= 2 and sy:
+        r0, r1 = readings[0], readings[-1]
+        d = tables[r1][["code", "name"]].copy()
+        d["storage_change_mcm"] = (tables[r1]["storage_mcm"] - tables[r0]["storage_mcm"]).round(3)
+        d.to_csv(out / "storage_change.csv", index=False)
+        print(f"\nStorage change {r0} → {r1} (MCM):")
+        print(d.dropna().to_string(index=False))
+    print(f"\nMaps and tables in {out}")
+    return 0
+
+
+def _property(a):
+    from .io import load_project
+    from .model3d import build_model
+    from .property3d import (build_property, parameters, property_html, property_slices,
+                             write_property_vtk)
+
+    project = load_project(a.data)
+    params = parameters(project)
+    if not a.parameter:
+        print("Downhole parameters: " + (", ".join(params) if params else "none (fill the Downhole sheet)"))
+        return 0
+    boundary = _boundary(a, project)
+    model = build_model(project, datum=a.datum, boundary=boundary)
+    log = {"auto": None, "log": True, "linear": False}[a.scale]
+    pm = build_property(project, model, a.parameter, a.anisotropy, log=log, datum=a.datum)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    tag = _safe(a.parameter)
+    files = [property_slices(pm, out / f"{tag}_slices.pdf", title=a.title or project.name),
+             property_html(pm, out / f"{tag}_3d.html", title=a.title or project.name),
+             write_property_vtk(pm, out / f"{tag}.vtk")]
+    st = pm.stats()
+    print(f"{a.parameter} ({pm.unit}): min {st['min']:.4g}, mean {st['mean']:.4g}, max {st['max']:.4g}"
+          f" from {len(pm.samples)} readings")
+    if a.below is not None or a.above is not None:
+        vol = pm.volume_between(a.above, a.below)
+        rng = " and ".join(x for x in (f"≥ {a.above:g}" if a.above is not None else "",
+                                       f"≤ {a.below:g}" if a.below is not None else "") if x)
+        print(f"Volume with {a.parameter} {rng}: {vol / 1e6:,.2f} MCM")
+    for f in files:
+        print(f"  {f}")
+    return 0
+
+
+def _strat(a):
+    from .grid import Grid, write_ascii_grid
+    from .io import load_project
+    from .model3d import slices_figure
+    from .solid import export_solids
+    from .strat import build_strat_model
+
+    project = load_project(a.data, legend=a.legend)
+    boundary = _boundary(a, project)
+    model = build_strat_model(project, a.order, method=a.method, boundary=boundary)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    sy = _sy(a.sy)
+    files = export_solids(model, project.legend, out, title=a.title or project.name, sy=sy)
+    files.append(slices_figure(model, project.legend, out / "slices.pdf", title=a.title or project.name))
+    for code, surf in model.surfaces.items():
+        files.append(write_ascii_grid(Grid(model.x, model.y, surf, model.cell, model.inside), out / f"top_{_safe(code)}.asc"))
+    v = model.volumes(sy)
+    v.insert(1, "name", [project.legend.get(c).name for c in v["code"]])
+    v.to_csv(out / "volumes.csv", index=False)
+    print(v[["code", "name", "volume_mcm", "percent"] + (["storage_mcm"] if sy else [])].round(1).to_string(index=False))
+    for f in files:
+        print(f"  {f}")
+    return 0
+
+
+def _chem(a):
+    from .hydrochem import analyse, load_chemistry, report
+
+    df = load_chemistry(a.file)
+    files = report(df, a.out, a.title)
+    res = analyse(df)
+    bad = res[~res["balance_ok_5pct"]]
+    print(f"{len(df)} samples; water types: " + ", ".join(f"{k} ({v})" for k, v in res["water_type"].value_counts().items()))
+    if len(bad):
+        print(f"Ionic balance outside ±5 %: {', '.join(bad['sample'])}")
+    for f in files:
+        print(f"  {f}")
+    return 0
+
+
+def _fractures(a):
+    from .fractures import fracture_report
+    from .io import load_project
+
+    project = load_project(a.data)
+    print(f"  {fracture_report(project, a.out, a.borehole, a.title or project.name)}")
+    return 0
 
 
 def _studio(a):

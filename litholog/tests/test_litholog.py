@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -414,3 +415,112 @@ def test_project_file_roundtrip(tmp_path):
     (tmp_path / "bad.llproj").write_text('{"format": "x"}')
     with pytest.raises(ValueError):
         load(tmp_path / "bad.llproj")
+
+
+# --- Aquifer, property, stratigraphy, hydrochemistry, fractures ---------------------
+
+SAMPLE = Path(__file__).parents[1] / "examples" / "sample_project.xlsx"
+
+
+def test_wells_long_wide_and_latlon(tmp_path):
+    from pyproj import Transformer
+
+    from litholog.aquifer import load_wells
+
+    lon, lat = Transformer.from_crs(32643, 4326, always_xy=True).transform([651000, 652000], [1688000, 1687000])
+    wide = pd.DataFrame({"Station": ["A", "B"], "Latitude": lat, "Longitude": lon,
+                         "Pre-monsoon 2023": [12.0, 9.0], "Post-monsoon 2023": [5.0, 3.5]})
+    wide.to_csv(tmp_path / "wide.csv", index=False)
+    w = load_wells(tmp_path / "wide.csv", crs="EPSG:32643")
+    assert w.readings == ["Pre-monsoon 2023", "Post-monsoon 2023"]
+    assert abs(w.table["x"].iloc[0] - 651000) < 0.01 and "converted" in w.note
+    long = pd.DataFrame({"Well": ["A", "A", "B", "B"], "X": [1, 1, 5, 5], "Y": [1, 1, 5, 5],
+                         "Date": ["May", "Nov", "May", "Nov"], "DTW (m bgl)": [10, 4, 8, 3]})
+    long.to_excel(tmp_path / "long.xlsx", index=False)
+    w2 = load_wells(tmp_path / "long.xlsx")
+    assert w2.readings == ["May", "Nov"] and list(w2.values("Nov")["dtw"]) == [4, 3]
+
+
+def test_saturated_volume_below_water_table(tmp_path):
+    from litholog.aquifer import Wells, saturated_volumes, water_table
+    from litholog.model3d import build_model
+
+    proj, _ = _grid_project(tmp_path)  # topsoil 0-3 m, unit 4 3-13 m, unit 3 below; ground = 100 + x/100
+    m = build_model(proj, cell=100, dz=1.0)
+    b = proj.boreholes
+    t = pd.DataFrame({"well_id": b["borehole_id"], "x": b["x"], "y": b["y"], "ground": np.nan, "dry": 8.0})
+    wt = water_table(m, Wells(t, ["dry"]), "dry")
+    v = saturated_volumes(m, wt, {"4": 0.1}).set_index("code")
+    # water at 8 m depth: unit 4 (3-13 m) is half saturated, topsoil dry, unit 3 fully saturated
+    assert abs(v.loc["4", "saturated_pct"] - 50) < 12
+    assert v.loc["1", "saturated_pct"] < 5 and v.loc["3", "saturated_pct"] > 95
+    assert abs(v.loc["4", "storage_mcm"] - 0.1 * v.loc["4", "saturated_mcm"]) < 1e-9
+
+
+def test_property_model_honours_data():
+    from litholog.io import load_project
+    from litholog.model3d import build_model
+    from litholog.property3d import build_property, parameters
+
+    p = load_project(SAMPLE)
+    assert "Resistivity" in parameters(p)
+    m = build_model(p, datum="elevation")
+    pm = build_property(p, m, "Resistivity", datum="elevation")
+    s = pm.samples.iloc[len(pm.samples) // 2]
+    k, j, i = (int(np.argmin(abs(a - v))) for a, v in ((m.z, s.z), (m.y, s.y), (m.x, s.x)))
+    if np.isfinite(pm.values[k, j, i]):
+        assert abs(np.log10(pm.values[k, j, i]) - np.log10(s.value)) < 0.5
+    assert pm.volume_between(hi=pm.stats()["max"]) > 0
+
+
+def test_strat_model_orders_surfaces(tmp_path):
+    from litholog.strat import build_strat_model
+
+    proj, _ = _grid_project(tmp_path)
+    m = build_strat_model(proj, ["1", "4", "3"], cell=100, dz=1.0)
+    s1, s4, s3 = (m.surfaces[c] for c in ("1", "4", "3"))
+    assert np.all(s4 <= s1 + 1e-9) and np.all(s3 <= s4 + 1e-9)
+    v = m.volumes().set_index("code")
+    area = (m.lith >= 0).any(0).sum() * m.cell ** 2
+    assert abs(v.loc["4", "volume_m3"] / area - 10) < 1.5  # 10 m thick unit
+
+
+def test_hydrochem_indices_and_diagrams(tmp_path):
+    from litholog.hydrochem import analyse, load_chemistry, report, ussl_class, wilcox_class
+
+    df = pd.DataFrame({"Sample": ["A", "B"], "Ca (mg/L)": [40.078, 80], "Mg (mg/L)": [24.305, 20],
+                       "Na (mg/L)": [45.98, 200], "K": [0, 5], "HCO3": [183.05, 300], "CO3": [0, 0],
+                       "Cl": [70.906, 250], "SO4": [0, 50], "EC (uS/cm)": [500, 1800], "TDS": [320, 1150]})
+    d = load_chemistry(df)
+    r = analyse(d)
+    # sample A: Ca 2, Mg 2, Na 2 meq/L; HCO3 3, Cl 2 → SAR = 2/sqrt(2) = 1.41
+    assert abs(r["SAR"][0] - 1.41) < 0.01
+    assert abs(r["ionic_balance_pct"][0] - 9.09) < 0.05
+    assert r["water_type"][0] in ("Ca-HCO3", "Mg-HCO3", "Na-HCO3")
+    assert ussl_class(500, 1.4) == "C2S1" and wilcox_class(1800, 20) == "Permissible"
+    files = report(d, tmp_path / "chem")
+    names = {f.name for f in files}
+    assert {"piper.png", "durov.png", "stiff.png", "ussl.png", "wilcox.png", "hydrochemistry.pdf"} <= names
+
+
+def test_fractures_rose_stereonet_and_log_track(tmp_path):
+    from litholog.fractures import _pole_xy, fracture_report, table
+    from litholog.io import load_project
+    from litholog.striplog import save_striplog
+
+    # plane dipping 90 toward east: pole horizontal toward west, on the primitive
+    x, y = _pole_xy(np.array([90.0]), np.array([90.0]))
+    assert abs(x[0] + 1) < 1e-9 and abs(y[0]) < 1e-9
+    p = load_project(SAMPLE)
+    assert len(table(p)) > 10
+    assert fracture_report(p, tmp_path / "fr.png").exists()
+    assert save_striplog(p.borehole("BW-01"), p.legend, tmp_path / "log.png")[0].exists()
+
+
+def test_log_section_and_new_cli(tmp_path):
+    out = tmp_path / "o"
+    assert main(["section", str(SAMPLE), "-b", "BW-01", "BW-03", "--style", "logs", "--curve", "Resistivity",
+                 "-o", str(out), "-f", "png"]) == 0
+    assert main(["fractures", str(SAMPLE), "-o", str(out / "fr.pdf")]) == 0
+    assert main(["strat", str(SAMPLE), "--order", "RSOIL", "WGRA", "GRA", "-o", str(out / "strat")]) == 0
+    assert (out / "strat" / "volumes.csv").exists()
