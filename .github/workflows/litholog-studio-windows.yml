@@ -1,0 +1,48 @@
+# Builds the LithoLog Studio Windows installer from the litholog/ folder.
+name: LithoLog Studio (Windows build)
+
+on:
+  push:
+    branches: ["claude/**"]
+    paths: ["litholog/**", ".github/workflows/litholog-studio-windows.yml"]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: litholog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install LithoLog and build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[studio]" pyinstaller
+      - name: Bundle with PyInstaller
+        run: pyinstaller packaging/litholog_studio.spec --noconfirm
+      - name: Check the bundle (engine, exports, GUI libraries)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\LithoLogStudio\LithoLogStudio.exe" -ArgumentList "--check","check.txt" -Wait -PassThru
+          Get-Content check.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          } else { $iscc = "iscc" }
+          & $iscc packaging\installer.iss
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\LithoLogStudio -DestinationPath dist\installer\LithoLogStudio-portable.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LithoLogStudio-Windows
+          path: litholog/dist/installer/*
+          retention-days: 30
