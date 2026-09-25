@@ -80,13 +80,14 @@ class BlockModel:
 
 def build_model(project: Project, cell: float | None = None, dz: float | None = None,
                 power: float = 2.0, target: int = 70, datum: str = "depth",
-                max_voxels: int = 3_000_000, boundary=None) -> BlockModel:
+                max_voxels: int = 3_000_000, boundary=None, dem=None) -> BlockModel:
     """Indicator-IDW lithology model.
 
     ``datum="depth"`` (default) compares holes at the same depth below ground, so
     layers follow the land surface (weathering profile, fracture zones in hard
     rock). ``datum="elevation"`` compares them at the same elevation (flat-lying
-    or regionally dipping sediments).
+    or regionally dipping sediments). ``dem``: a DEM used as the ground surface
+    (the drilled depth is hung below it).
     """
     holes = []
     for bh in project:
@@ -104,7 +105,15 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
         gx, gy, cell = make_axes(np.r_[hx, bx0, bx1], np.r_[hy, by0, by1], cell, margin=0.01, target=target)
     else:
         gx, gy, cell = make_axes(hx, hy, cell, target=target)
-    zlo, zhi = float(bots.min()), float(tops.max())
+    ground = interpolate(hx, hy, tops, gx, gy, "linear")
+    base = ground - np.clip(interpolate(hx, hy, tops - bots, gx, gy, "linear"), 0, None)
+    if dem is not None:
+        from .dem import sample_on_grid
+
+        g = sample_on_grid(dem, gx, gy)
+        ground = np.where(np.isfinite(g), g, ground)
+        base = ground - np.clip(interpolate(hx, hy, tops - bots, gx, gy, "linear"), 0, None)
+    zlo, zhi = float(min(bots.min(), np.nanmin(base))), float(max(tops.max(), np.nanmax(ground)))
     if not dz:  # fine enough to keep thin layers: half the 10th-percentile layer thickness
         thick = np.array([u.thick for _, us in holes for u in us])
         dz = float(np.clip(np.percentile(thick, 10) / 2, 0.5, max((zhi - zlo) / 60, 0.5)))
@@ -115,8 +124,6 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
 
     codes = list(dict.fromkeys(u.code for _, us in holes for u in us))
     cidx = {c: k for k, c in enumerate(codes)}
-    ground = interpolate(hx, hy, tops, gx, gy, "linear")
-    base = interpolate(hx, hy, bots, gx, gy, "linear")
     cov = None
     if boundary is not None:
         from .grid import coverage

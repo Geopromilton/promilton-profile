@@ -20,14 +20,30 @@ class Ribbon(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        badge = QLabel("◆ LithoLog Studio")
-        badge.setObjectName("AppBadge")
+        from .logo import pixmap
+
+        badge = QWidget()
+        bl = QHBoxLayout(badge)
+        bl.setContentsMargins(12, 0, 10, 0)
+        bl.setSpacing(6)
+        mark = QLabel()
+        mark.setPixmap(pixmap(26))
+        name = QLabel("LithoLog Studio")
+        name.setObjectName("AppBadge")
+        bl.addWidget(mark)
+        bl.addWidget(name)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("Ribbon")
         self.tabs.setCornerWidget(badge, Qt.TopLeftCorner)
         lay.addWidget(self.tabs)
         self.setFixedHeight(122)
         self.buttons = {}
+        self._icons = {}
+
+    def refresh_icons(self):
+        """Re-colour the icons after a theme change."""
+        for key, b in self.buttons.items():
+            b.setIcon(theme.icon(self._icons[key]))
 
     def page(self, title: str) -> QWidget:
         w = QWidget()
@@ -61,6 +77,7 @@ class Ribbon(QWidget):
                 b.clicked.connect(cb)
             row.addWidget(b)
             self.buttons[key] = b
+            self._icons[key] = icon_name
         v.addLayout(row)
         t = QLabel(title)
         t.setObjectName("RibbonGroupTitle")
@@ -106,7 +123,7 @@ class FigureDoc(QWidget):
         self.figure = fig
         self.canvas = FigureCanvasQTAgg(fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
-        self.toolbar.setStyleSheet(f"background: {theme.PANEL}; border-bottom: 1px solid {theme.BORDER};")
+        self.apply_theme()
         for text, factor in (("−", 1 / 1.25), ("+", 1.25), ("Fit", None)):
             b = QToolButton()
             b.setText(text)
@@ -115,6 +132,11 @@ class FigureDoc(QWidget):
         self.v.insertWidget(0, self.toolbar)
         self.scroll.setWidget(self.canvas)
         self.set_zoom(None)
+
+    def apply_theme(self):
+        self.scroll.setStyleSheet(f"QScrollArea {{ background: {theme.BG}; border: none; }}")
+        if self.toolbar is not None:
+            self.toolbar.setStyleSheet(f"background: {theme.PANEL}; border-bottom: 1px solid {theme.BORDER};")
 
     def set_zoom(self, factor):
         """factor None = fit the whole page in the window."""

@@ -25,6 +25,13 @@ def run(timeout: float = 300) -> int:
     if ok:
         w.show_striplog(bid=w.project.ids[0])
         app.processEvents()
+        ok = bool(w.viewer.legend.items)          # legend bar filled with volumes
+        c = w.model.codes[0]                       # recolour a layer as the dialog would
+        w.project.legend = w.project.legend.updated([{"code": c, "color": "#FF00FF"}])
+        w.viewer.set_unit_color(c, "#FF00FF")
+        w.set_theme("light")
+        w.set_theme("dark")
+        app.processEvents()
     print("LithoLog Studio smoke test:", "OK" if ok else "FAILED")
     w.close()
     return 0 if ok else 1
@@ -85,14 +92,42 @@ def check(report_path: str) -> int:
         state["m"] = build_model(state["p"])
         assert build_solids(state["m"], cutaway="sw")
 
+    def horizons():
+        from ..horizons import build_horizon_model, horizon_volumes
+        from ..solid import build_solids
+
+        m = build_horizon_model(state["p"])
+        assert len(horizon_volumes(m)) and build_solids(m, cutaway="sw")
+
+    def dem_and_boundaries():
+        import json
+
+        import numpy as np
+
+        from ..boundary import load_boundary
+        from ..dem import load_dem, sample
+
+        (out / "d.asc").write_text("ncols 3\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 10\n"
+                                   "NODATA_value -9999\n1 2 3\n4 5 6\n")
+        assert np.isfinite(sample(load_dem(out / "d.asc"), [10], [10])).all()
+        ring = [[77.5, 8.3], [77.6, 8.3], [77.6, 8.4], [77.5, 8.3]]
+        (out / "b.geojson").write_text(json.dumps({"type": "Polygon", "coordinates": [ring]}))
+        load_boundary(out / "b.geojson", crs="EPSG:32643")
+        coords = " ".join(f"{x},{y},0" for x, y in ring)
+        (out / "b.kml").write_text('<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><Polygon>'
+                                   f'<outerBoundaryIs><LinearRing><coordinates>{coords}</coordinates>'
+                                   '</LinearRing></outerBoundaryIs></Polygon></Placemark></kml>')
+        load_boundary(out / "b.kml", crs="EPSG:32643")
+        import tifffile  # noqa: F401 - GeoTIFF DEMs
+
     def gui_imports():
         import pyvista  # noqa: F401
         import pyvistaqt  # noqa: F401
         import qtawesome  # noqa: F401
         import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
-        from PySide6 import QtWidgets  # noqa: F401
+        from PySide6 import QtSvg, QtWidgets  # noqa: F401
 
-        from . import mainwindow, viewer3d  # noqa: F401
+        from . import legendbar, logo, mainwindow, viewer3d  # noqa: F401
 
     def reproject():
         from pyproj import Transformer
@@ -121,6 +156,7 @@ def check(report_path: str) -> int:
 
     for name, fn in [("load demo", load), ("strip log PDF", logs), ("cross-section PDF", section),
                      ("kriged map PDF", maps), ("3D model + smooth solids", model),
+                     ("horizon model + solids", horizons), ("DEM, KML, GeoJSON", dem_and_boundaries),
                      ("aquifer, property, strat, fractures, chemistry", analysis),
                      ("GUI libraries (Qt, VTK, icons)", gui_imports), ("reprojection (PROJ data)", reproject)]:
         step(name, fn)

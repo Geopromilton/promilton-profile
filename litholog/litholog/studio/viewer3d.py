@@ -9,6 +9,12 @@ from PySide6.QtWidgets import QVBoxLayout, QWidget
 from pyvistaqt import QtInteractor
 
 from . import theme
+from .legendbar import LegendBar
+
+BACKGROUNDS = {  # name -> (bottom, top) or a single colour; "theme" follows the UI theme
+    "theme": None, "white": ("#FFFFFF", None), "black": ("#000000", None),
+    "sky": ("#FFFFFF", "#9DB9D8"), "graphite": ("#15181E", "#3A4353"),
+}
 
 VIEW_DIRS = {  # camera direction (from focal point towards the camera), view-up
     "iso_sw": ((-1, -1.1, 0.9), (0, 0, 1)),
@@ -37,15 +43,19 @@ class Viewer3D(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
         self.plotter = QtInteractor(self, auto_update=False)
-        lay.addWidget(self.plotter.interactor)
+        lay.addWidget(self.plotter.interactor, 1)
+        self.legend = LegendBar(self)
+        lay.addWidget(self.legend)
         p = self.plotter
-        p.set_background(theme.VIEW_BG_BOTTOM, top=theme.VIEW_BG_TOP)
+        self.background = "theme"
+        self.show_axes_grid = True
         try:
             p.enable_anti_aliasing("fxaa")
         except Exception:  # noqa: BLE001 - older/limited GL: carry on without AA
             pass
-        p.add_axes(interactive=False, line_width=2, color=theme.TEXT, xlabel="E", ylabel="N", zlabel="Up")
+        self.apply_theme(render=False)
         self.units = {}          # code -> actor
         self.extras = {}         # name -> actor (boreholes, labels, boundary, grid)
         self.ve = 1.0
@@ -53,10 +63,41 @@ class Viewer3D(QWidget):
         self._model = None
         self._welcome()
 
+    def _bg_colors(self):
+        if self.background == "theme" or self.background not in BACKGROUNDS:
+            return theme.VIEW_BG_BOTTOM, theme.VIEW_BG_TOP
+        return BACKGROUNDS[self.background]
+
+    def _fg(self):
+        """Text colour that reads on the current 3D background."""
+        from PySide6.QtGui import QColor
+
+        bottom, top = self._bg_colors()
+        light = QColor(bottom).lightnessF() * (0.5 if top else 1) + (QColor(top).lightnessF() * 0.5 if top else 0)
+        return "#1E2530" if light > 0.55 else "#E6E9EE"
+
+    def apply_theme(self, render=True):
+        """Background and axis colours after a theme or background change."""
+        p = self.plotter
+        bottom, top = self._bg_colors()
+        p.set_background(bottom, top=top)
+        try:
+            p.hide_axes()
+        except Exception:  # noqa: BLE001
+            pass
+        p.add_axes(interactive=False, line_width=2, color=self._fg(), xlabel="E", ylabel="N", zlabel="Up")
+        self.legend.update()
+        if render:
+            p.render()
+
+    def set_background(self, name):
+        self.background = name
+        self.apply_theme()
+
     # ------------------------------------------------------------------
     def _welcome(self):
         self.plotter.add_text("LithoLog Studio\nOpen borehole data to begin  (Home ▸ Open)",
-                              position="upper_left", font_size=11, color=theme.TEXT_DIM, name="welcome")
+                              position="upper_left", font_size=11, color=self._fg(), name="welcome")
         self.plotter.render()
 
     def clear(self):
@@ -113,15 +154,18 @@ class Viewer3D(QWidget):
             p.add_mesh(seg, color=col, smooth_shading=True, name=f"bh_{k}", ambient=0.3, specular=0.3)
         if labels and tops:
             self.extras["labels"] = p.add_point_labels(
-                np.array([t[1] for t in tops]), [t[0] for t in tops], font_size=11, text_color="white",
+                np.array([t[1] for t in tops]), [t[0] for t in tops], font_size=11, text_color=self._fg(),
                 shape=None, show_points=False, always_visible=True, name="bh_labels", bold=True)
 
     def _grid(self, model, ve):
         """Bounding grid with true coordinates (the geometry's z is exaggerated by ``ve``)."""
         p = self.plotter
+        if not self.show_axes_grid:
+            p.remove_bounds_axes()
+            return
         b = p.bounds
         self.extras["grid"] = p.show_grid(
-            color=theme.TEXT_DIM, font_size=9, xtitle="Easting (m)", ytitle="Northing (m)",
+            color=self._fg(), font_size=9, xtitle="Easting (m)", ytitle="Northing (m)",
             ztitle=f"Elevation (m)   VE ×{ve:g}", n_xlabels=5, n_ylabels=5, n_zlabels=5, fmt="%.0f",
             location="outer", ticks="outside", minor_ticks=False,
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
@@ -206,10 +250,60 @@ class Viewer3D(QWidget):
             a.SetVisibility(bool(visible))
             self.plotter.render()
 
-    def set_opacity(self, value: float):
-        for a in self.units.values():
-            a.GetProperty().SetOpacity(value)
+    def set_opacity(self, value: float, per_unit=None):
+        """Overall opacity; ``per_unit`` {code: factor} from the layer properties."""
+        per_unit = per_unit or {}
+        for code, a in self.units.items():
+            a.GetProperty().SetOpacity(value * per_unit.get(code, 1.0))
         self.plotter.render()
+
+    def set_unit_color(self, code, color):
+        a = self.units.get(code)
+        if a is not None:
+            from PySide6.QtGui import QColor
+
+            c = QColor(color)
+            a.GetProperty().SetColor(c.redF(), c.greenF(), c.blueF())
+        self.plotter.render()
+
+    def set_axes_grid(self, on: bool):
+        self.show_axes_grid = on
+        if self._model is not None:
+            self._grid(self._model, self.ve)
+        self.plotter.render()
+
+    def show_terrain(self, dem, model, ve, margin=0.15, n=220, opacity=0.9):
+        """The DEM around the model as a shaded, elevation-coloured surface."""
+        from ..dem import sample_on_grid
+
+        x0, x1, y0, y1 = model.x[0], model.x[-1], model.y[0], model.y[-1]
+        dx, dy = (x1 - x0) * margin, (y1 - y0) * margin
+        gx = np.linspace(x0 - dx, x1 + dx, n)
+        gy = np.linspace(y0 - dy, y1 + dy, n)
+        z = sample_on_grid(dem, gx, gy)
+        if not np.isfinite(z).any():
+            self.message.emit("The DEM does not cover the model area (check its coordinate system).")
+            return False
+        X, Y = np.meshgrid(gx, gy)
+        # keep the terrain just outside the model so it does not hide the top of the solids
+        inside = np.zeros_like(z, bool)
+        if model.inside is not None:
+            ix = np.clip(np.searchsorted(model.x, gx), 0, len(model.x) - 1)
+            iy = np.clip(np.searchsorted(model.y, gy), 0, len(model.y) - 1)
+            within = ((gx >= x0) & (gx <= x1))[None, :] & ((gy >= y0) & (gy <= y1))[:, None]
+            inside = within & model.inside[np.ix_(iy, ix)]
+        zz = np.where(inside, np.nan, z)
+        grid = pv.StructuredGrid(X, Y, np.nan_to_num(z, nan=np.nanmin(z)) * ve)
+        grid["Elevation (m)"] = z.ravel(order="F")
+        grid["keep"] = np.isfinite(zz).ravel(order="F").astype(float)
+        surf = grid.threshold(0.5, scalars="keep")
+        self.extras["terrain"] = self.plotter.add_mesh(
+            surf, scalars="Elevation (m)", cmap="gist_earth", opacity=opacity, smooth_shading=True,
+            name="terrain", show_scalar_bar=True, specular=0.1,
+            scalar_bar_args=dict(title="DEM elevation (m)", color=self._fg(), vertical=True, position_x=0.9,
+                                 position_y=0.25, height=0.5, width=0.05, title_font_size=11, label_font_size=9))
+        self.plotter.render()
+        return True
 
     def set_extras_visible(self, prefix: str, visible: bool):
         for name, actor in list(self.plotter.renderer.actors.items()):
@@ -248,6 +342,18 @@ class Viewer3D(QWidget):
             pass
         self.plotter.render()
 
-    def screenshot(self, path, scale: int = 3, transparent=False):
+    def screenshot(self, path, scale: int = 3, transparent=False, legend=True):
+        """High-resolution image; the legend bar is added below the 3D view."""
         self.plotter.screenshot(str(path), scale=scale, transparent_background=transparent)
+        if legend and self.legend.isVisible() and self.legend.items:
+            from PySide6.QtGui import QImage, QPainter
+
+            shot = QImage(str(path))
+            leg = self.legend.image(shot.width(), scale=float(scale))
+            out = QImage(shot.width(), shot.height() + leg.height(), QImage.Format_ARGB32)
+            p = QPainter(out)
+            p.drawImage(0, 0, shot)
+            p.drawImage(0, shot.height(), leg)
+            p.end()
+            out.save(str(path))
         return path

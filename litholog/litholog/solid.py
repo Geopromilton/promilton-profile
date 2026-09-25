@@ -64,6 +64,10 @@ def build_solids(model: BlockModel, smooth: float = 1.0, cutaway: str | None = N
     from scipy.ndimage import gaussian_filter
     from skimage.measure import marching_cubes
 
+    if getattr(model, "kind", "") == "horizon":  # exact solids from the horizon surfaces
+        from .horizons import horizon_solids
+
+        return horizon_solids(model, cutaway, only)
     if model.prob is None:
         raise ValueError("Rebuild the model with this version of LithoLog (probabilities missing)")
     nz, ny, nx, nc = model.prob.shape

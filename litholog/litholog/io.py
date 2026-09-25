@@ -198,6 +198,18 @@ def load_legend(path, base: Legend | None = None) -> Legend:
     return (base or Legend()).updated(df.to_dict("records"))
 
 
+def save_legend(legend: Legend, path, codes=None) -> Path:
+    """Write a legend table (Code, Name, Color, Pattern, Group) that load_legend reads back."""
+    codes = list(codes) if codes is not None else [t.code for t in legend]
+    rows = [{"Code": c, "Name": legend.get(c).name, "Color": legend.get(c).color,
+             "Pattern": legend.get(c).pattern, "Group": legend.get(c).group} for c in codes]
+    path = Path(path)
+    df = pd.DataFrame(rows)
+    df.to_excel(path, index=False, sheet_name="Legend") if path.suffix.lower() == ".xlsx" \
+        else df.to_csv(path, index=False)
+    return path
+
+
 def _looks_like_gms(path: Path) -> bool:
     if path.suffix.lower() != ".csv":
         return False

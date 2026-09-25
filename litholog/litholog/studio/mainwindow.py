@@ -35,7 +35,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"LithoLog Studio {__version__}")
-        self.setWindowIcon(theme.icon("mdi6.layers-triple", theme.ACCENT))
+        from .logo import app_icon
+
+        self.setWindowIcon(app_icon())
         self.resize(1680, 980)
         self.pool = QThreadPool.globalInstance()
         self.project = None
@@ -45,6 +47,10 @@ class MainWindow(QMainWindow):
         self.data_path = None
         self.legend_path = None
         self.boundary_path = None
+        self.dem = None
+        self.dem_path = None
+        self.layer_state = {}    # code -> {"visible": bool, "opacity": 0-1}
+        self._redo = {}          # document -> callable that redraws it (after legend edits)
         self._current_map = None
 
         self._build_ribbon()
@@ -68,6 +74,7 @@ class MainWindow(QMainWindow):
             ("open", "mdi6.folder-open-outline", "Open data", self.open_data, False),
             ("legend", "mdi6.palette-outline", "Legend", self.open_legend, False),
             ("boundary", "mdi6.vector-polygon", "Boundary", self.open_boundary, False),
+            ("dem", "mdi6.terrain", "DEM", self.open_dem, False),
             ("demo", "mdi6.flask-outline", "Demo project", self.open_demo, False),
         ])
         r.group(home, "Output", [
@@ -90,6 +97,8 @@ class MainWindow(QMainWindow):
         r.group(mp, "Export", [("asc", "mdi6.grid", "Grid (.asc)", self.export_grid, False)])
         md = r.page("3D Model")
         r.group(md, "Model", [("build", "mdi6.cube-outline", "Build model", self.build_model, False)])
+        r.group(md, "Layers", [("layers", "mdi6.palette-swatch-outline", "Layer\nproperties",
+                                lambda: self.layer_properties(), False)])
         r.group(md, "Views", [
             ("v_iso", "mdi6.axis-arrow", "Oblique", lambda: self.view("iso_sw"), False),
             ("v_ne", "mdi6.rotate-3d-variant", "Oblique NE", lambda: self.view("iso_ne"), False),
@@ -124,6 +133,29 @@ class MainWindow(QMainWindow):
         r.group(an, "Structure", [
             ("fract", "mdi6.compass-outline", "Fractures", self.show_fractures, False),
         ])
+        vw = r.page("View")
+        r.group(vw, "Theme", [
+            ("th_dark", "mdi6.weather-night", "Dark", lambda: self.set_theme("dark"), True),
+            ("th_light", "mdi6.white-balance-sunny", "Light", lambda: self.set_theme("light"), True),
+        ])
+        r.group(vw, "3D background", [
+            ("bg_theme", "mdi6.gradient-vertical", "Theme", lambda: self.set_bg("theme"), True),
+            ("bg_white", "mdi6.square-outline", "White", lambda: self.set_bg("white"), True),
+            ("bg_sky", "mdi6.weather-partly-cloudy", "Sky", lambda: self.set_bg("sky"), True),
+            ("bg_black", "mdi6.square", "Black", lambda: self.set_bg("black"), True),
+        ])
+        r.group(vw, "Show", [
+            ("sh_legend", "mdi6.format-list-bulleted-type", "Legend bar", self.toggle_legend, True),
+            ("sh_grid", "mdi6.axis-arrow-info", "Axes grid", self.toggle_grid, True),
+            ("sh_terrain", "mdi6.terrain", "Terrain\n(DEM)", self.toggle_terrain, True),
+        ])
+        r.group(vw, "Layers", [("layers2", "mdi6.palette-swatch-outline", "Layer\nproperties",
+                                lambda: self.layer_properties(), False)])
+        r.buttons["sh_legend"].setChecked(True)
+        r.buttons["sh_grid"].setChecked(True)
+        r.buttons["bg_theme"].setChecked(True)
+        r.buttons["th_dark"].setChecked(theme.MODE == "dark")
+        r.buttons["th_light"].setChecked(theme.MODE == "light")
         self.setMenuWidget(r)
 
     def _build_documents(self):
@@ -132,6 +164,8 @@ class MainWindow(QMainWindow):
         self.docs.setDocumentMode(True)
         self.viewer = Viewer3D()
         self.viewer.message.connect(self.log)
+        self.viewer.legend.edit_requested.connect(self.layer_properties)
+        self.viewer.legend.visibility_changed.connect(self._set_unit_visible)
         self.doc_log = FigureDoc("Select a borehole in the Project panel and click Boreholes ▸ Strip log.")
         self.doc_sec = FigureDoc("Sections ▸ New section to draw a cross-section.")
         self.doc_fence = FigureDoc("Sections ▸ Fence diagram.")
@@ -146,6 +180,7 @@ class MainWindow(QMainWindow):
                             (self.doc_chem, "Chemistry", "mdi6.flask-round-bottom-outline"),
                             (self.doc_fract, "Fractures", "mdi6.compass-outline")]:
             self.docs.addTab(w, theme.icon(ic, theme.TEXT_DIM), name)
+            self._doc_icons = getattr(self, "_doc_icons", []) + [ic]
         self.setCentralWidget(self.docs)
 
     def _dock(self, title, widget, area):
@@ -172,6 +207,20 @@ class MainWindow(QMainWindow):
 
         g = QGroupBox("Model")
         f = QFormLayout(g)
+        self.p_method = QComboBox()
+        self.p_method.addItem("Horizons – correlated layers", "horizons")
+        self.p_method.addItem("Voxel – indicator interpolation", "voxel")
+        self.p_method.setToolTip("Horizons: every layer is traced from hole to hole and its thickness "
+                                 "interpolated, so thin repeated layers (e.g. fracture zones) stay continuous, "
+                                 "like GMS 'Horizons → Solids'.\nVoxel: each cell takes the lithology most "
+                                 "boreholes have at that depth (good for irregular bodies/lenses).")
+        self.p_grid = QComboBox()
+        for label, val in [("Inverse distance", "idw"), ("Kriging", "kriging"), ("Linear (TIN)", "linear")]:
+            self.p_grid.addItem(label, val)
+        self.p_usedem = QCheckBox("Use DEM as ground surface")
+        self.p_rectify = QCheckBox("Replace collar elevations with DEM")
+        self.p_usedem.setEnabled(False)
+        self.p_rectify.setEnabled(False)
         self.p_datum = QComboBox()
         self.p_datum.addItem("Depth below ground (hard rock)", "depth")
         self.p_datum.addItem("Elevation (layered sediments)", "elevation")
@@ -180,12 +229,18 @@ class MainWindow(QMainWindow):
         self.p_clipb = QCheckBox("Clip to study area")
         self.p_clipb.setChecked(True)
         self.p_smooth = QSlider(Qt.Horizontal, minimum=0, maximum=12, value=4)
+        f.addRow("Method", self.p_method)
+        f.addRow("Interpolation", self.p_grid)
         f.addRow("Correlate at", self.p_datum)
         f.addRow("Cell (XY)", self.p_cell)
         f.addRow("Cell (Z)", self.p_dz)
         f.addRow("Smoothing", self.p_smooth)
         f.addRow("", self.p_clipb)
-        b = QPushButton(theme.icon("mdi6.cube-outline", "#1B1F26"), "  Build model")
+        f.addRow("", self.p_usedem)
+        f.addRow("", self.p_rectify)
+        self.p_method.currentIndexChanged.connect(self._method_changed)
+        self._method_changed()
+        b = self.build_btn = QPushButton(theme.icon("mdi6.cube-outline", theme.ON_ACCENT), "  Build model")
         b.setObjectName("Primary")
         b.clicked.connect(self.build_model)
         f.addRow(b)
@@ -216,7 +271,7 @@ class MainWindow(QMainWindow):
         self.p_smooth.sliderReleased.connect(self.redraw)
         for c in (self.p_holes, self.p_labels, self.p_bnd):
             c.toggled.connect(self.redraw)
-        self.p_opacity.valueChanged.connect(lambda val: self.viewer.set_opacity(val / 100))
+        self.p_opacity.valueChanged.connect(lambda val: self.viewer.set_opacity(val / 100, self._unit_opacity()))
         v.addWidget(g)
 
         g = QGroupBox("Volumes && storage")
@@ -231,7 +286,19 @@ class MainWindow(QMainWindow):
             self.vol.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.vol.setMinimumHeight(190)
         self.vol.itemChanged.connect(self._sy_changed)
-        gv.addWidget(self.vol)
+        self.hvol = QTableWidget(0, 5)
+        self.hvol.setHorizontalHeaderLabels(["Horizon (top → bottom)", "Holes", "Mean\nthick. (m)", "Area\n(%)",
+                                             "Volume\n(MCM)"])
+        self.hvol.verticalHeader().setVisible(False)
+        self.hvol.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in range(1, 5):
+            self.hvol.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        self.hvol.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.vtabs = QTabWidget()
+        self.vtabs.addTab(self.vol, "By layer")
+        self.vtabs.addTab(self.hvol, "By horizon")
+        self.vtabs.setMinimumHeight(230)
+        gv.addWidget(self.vtabs)
         self.vol_note = QLabel("Build a model to see volumes. Type a specific yield to estimate storage.")
         self.vol_note.setObjectName("Dim")
         self.vol_note.setWordWrap(True)
@@ -311,6 +378,10 @@ class MainWindow(QMainWindow):
             if name:
                 project.name = name
             self.project, self.data_path, self.model, self.solids = project, path, None, None
+            if not after:  # new data (not a project file): start with a clean layer set-up
+                self.dem, self.dem_path, self.layer_state, self._legend_rows = None, None, {}, {}
+                self.p_usedem.setEnabled(False)
+                self.p_rectify.setEnabled(False)
             self.legend_path = legend
             self.boundary, self.boundary_path = None, None
             if boundary:
@@ -340,7 +411,11 @@ class MainWindow(QMainWindow):
                 "smooth": self.p_smooth.value(), "clip_boundary": self.p_clipb.isChecked(),
                 "ve": self.p_ve.value(), "opacity": self.p_opacity.value(), "cutaway": self.p_cut.currentData(),
                 "boreholes": self.p_holes.isChecked(), "labels": self.p_labels.isChecked(),
-                "boundary": self.p_bnd.isChecked(), "specific_yield": self._sy()}
+                "boundary": self.p_bnd.isChecked(), "specific_yield": self._sy(),
+                "method": self.p_method.currentData(), "interpolation": self.p_grid.currentData(),
+                "use_dem": self.p_usedem.isChecked(), "rectify": self.p_rectify.isChecked(),
+                "layers": self.layer_state, "legend_rows": list(getattr(self, "_legend_rows", {}).values()),
+                "legend_title": self.viewer.legend.title, "background": self.viewer.background}
 
     def apply_settings(self, st: dict):
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
@@ -357,6 +432,15 @@ class MainWindow(QMainWindow):
         self.p_labels.setChecked(st.get("labels", True))
         self.p_bnd.setChecked(st.get("boundary", True))
         self.p_clipb.setChecked(st.get("clip_boundary", True))
+        self.p_method.setCurrentIndex(max(0, self.p_method.findData(st.get("method", "horizons"))))
+        self.p_grid.setCurrentIndex(max(0, self.p_grid.findData(st.get("interpolation", "idw"))))
+        self.p_usedem.setChecked(st.get("use_dem", True))
+        self.p_rectify.setChecked(st.get("rectify", False))
+        self.layer_state = {k: dict(v) for k, v in st.get("layers", {}).items()}
+        self._legend_rows = {r["code"]: r for r in st.get("legend_rows", [])}
+        self.viewer.legend.title = st.get("legend_title", "Lithology")
+        if st.get("background"):
+            self.set_bg(st["background"])
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
                   self.p_holes, self.p_labels, self.p_bnd, self.p_clipb):
             w.blockSignals(False)
@@ -370,7 +454,8 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save project", f"{self.project.name}.llproj",
                                               "LithoLog project (*.llproj)")
         if path:
-            save(path, self.project.name, self.data_path, self.legend_path, self.boundary_path, self.settings())
+            save(path, self.project.name, self.data_path, self.legend_path, self.boundary_path, self.settings(),
+                 dem=self.dem_path)
             self.log(f"Project saved: {path}")
 
     def open_project(self):
@@ -387,7 +472,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Open project", str(e))
             return
         self.apply_settings(pf["settings"])
-        self.load(pf["data"], legend=pf.get("legend"), name=pf.get("name"), boundary=pf.get("boundary"))
+        dem = pf.get("dem")
+        rows = list(getattr(self, "_legend_rows", {}).values())
+
+        def after():
+            if rows:
+                self.project.legend = self.project.legend.updated(rows)
+            if dem and Path(dem).exists():
+                self._load_dem(dem)
+
+        self.load(pf["data"], legend=pf.get("legend"), name=pf.get("name"), boundary=pf.get("boundary"),
+                  after=after)
 
     def open_legend(self):
         if not self.need_project():
@@ -405,7 +500,11 @@ class MainWindow(QMainWindow):
     def open_boundary(self):
         if not self.need_project():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open study-area boundary", "", "Shapefile (*.shp)")
+        from ..boundary import BOUNDARY_TYPES
+
+        path, _ = QFileDialog.getOpenFileName(self, "Open study-area boundary", "",
+                                              BOUNDARY_TYPES + ";;Shapefile (*.shp);;Google Earth (*.kml *.kmz);;"
+                                              "GeoJSON (*.geojson *.json);;All files (*)")
         if not path:
             return
         from ..boundary import load_boundary
@@ -459,9 +558,17 @@ class MainWindow(QMainWindow):
             lt = self.project.legend.get(c)
             it = QTreeWidgetItem(lg, [f"{lt.name}  ({c})"])
             it.setIcon(0, swatch(lt.color))
+            it.setData(0, Qt.UserRole, ("legend", c))
+            it.setToolTip(0, "Double-click to edit colour, name and pattern")
         if self.boundary is not None:
             it = QTreeWidgetItem(root, [f"Study area · {self.boundary.area / 1e6:,.1f} km²"])
             it.setIcon(0, theme.icon("mdi6.vector-polygon", "#E0524F"))
+        if self.dem is not None:
+            z = self.dem.z
+            import numpy as np
+
+            it = QTreeWidgetItem(root, [f"DEM {self.dem.name} · {np.nanmin(z):.0f}–{np.nanmax(z):.0f} m"])
+            it.setIcon(0, theme.icon("mdi6.terrain", "#6AAF6A"))
         if self.model is not None:
             mu = QTreeWidgetItem(root, ["3D model units"])
             mu.setIcon(0, theme.icon("mdi6.cube-outline", theme.TEXT_DIM))
@@ -469,8 +576,18 @@ class MainWindow(QMainWindow):
                 it = QTreeWidgetItem(mu, [self.project.legend.get(c).name])
                 it.setIcon(0, swatch(self.project.legend.get(c).color))
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-                it.setCheckState(0, Qt.Checked)
+                vis = self.layer_state.get(c, {}).get("visible", True)
+                it.setCheckState(0, Qt.Checked if vis else Qt.Unchecked)
                 it.setData(0, Qt.UserRole, ("unit", c))
+                it.setToolTip(0, "Tick to show/hide · double-click for layer properties")
+            if getattr(self.model, "kind", "") == "horizon":
+                hz = QTreeWidgetItem(root, [f"Horizons ({len(self.model.horizons)})"])
+                hz.setIcon(0, theme.icon("mdi6.layers-triple-outline", theme.TEXT_DIM))
+                for lab, h, v in zip(self.model.h_labels, self.model.horizons, self.model.h_volumes):
+                    it = QTreeWidgetItem(hz, [f"{lab} · {v / 1e6:,.0f} MCM"])
+                    it.setIcon(0, swatch(self.project.legend.get(h["code"]).color))
+                    it.setData(0, Qt.UserRole, ("legend", h["code"]))
+                hz.setExpanded(False)
         t.expandAll()
         bh.setExpanded(len(self.project.ids) <= 30)
         t.blockSignals(False)
@@ -478,12 +595,36 @@ class MainWindow(QMainWindow):
     def _tree_changed(self, item, col):
         tag = item.data(0, Qt.UserRole)
         if tag and tag[0] == "unit":
-            self.viewer.set_unit_visible(tag[1], item.checkState(0) == Qt.Checked)
+            vis = item.checkState(0) == Qt.Checked
+            self.layer_state.setdefault(tag[1], {})["visible"] = vis
+            self.viewer.set_unit_visible(tag[1], vis)
+            self.viewer.legend.set_visible_code(tag[1], vis)
 
     def _tree_double(self, item, col):
         tag = item.data(0, Qt.UserRole)
         if tag and tag[0] == "borehole":
             self.show_striplog(bid=tag[1])
+        elif tag and tag[0] in ("unit", "legend"):
+            self.layer_properties(tag[1])
+
+    def _set_unit_visible(self, code, vis):
+        """From the legend bar: keep explorer, viewer and state in step."""
+        self.layer_state.setdefault(code, {})["visible"] = vis
+        self.viewer.set_unit_visible(code, vis)
+        root = self.tree.invisibleRootItem()
+        stack = [root]
+        self.tree.blockSignals(True)
+        while stack:
+            it = stack.pop()
+            for k in range(it.childCount()):
+                stack.append(it.child(k))
+            tag = it.data(0, Qt.UserRole) if it is not root else None
+            if tag == ("unit", code):
+                it.setCheckState(0, Qt.Checked if vis else Qt.Unchecked)
+        self.tree.blockSignals(False)
+
+    def _unit_opacity(self):
+        return {c: st.get("opacity", 1.0) for c, st in self.layer_state.items()}
 
     def _selected_borehole(self):
         it = self.tree.currentItem()
@@ -493,29 +634,62 @@ class MainWindow(QMainWindow):
         return self.project.ids[0] if self.project and self.project.ids else None
 
     # ------------------------------------------------------------------ 3D model
+    def _method_changed(self, *_):
+        horizons = self.p_method.currentData() == "horizons"
+        self.p_datum.setEnabled(not horizons)
+        self.p_grid.setEnabled(horizons)
+        self.p_smooth.setEnabled(not horizons)
+
+    def _build(self, project, method, cell, dz, datum, grid, boundary, dem, rectify):
+        """Runs on the worker thread."""
+        if dem is not None:
+            from ..dem import rectify_collars
+
+            rep = rectify_collars(project, dem, replace=rectify)
+            d = rep["difference"].dropna()
+            self._dem_report = (len(d), float(d.mean()) if len(d) else 0.0,
+                                float(d.abs().max()) if len(d) else 0.0)
+        if method == "horizons":
+            from ..horizons import build_horizon_model
+
+            return build_horizon_model(project, cell, dz, method=grid, boundary=boundary, dem=dem)
+        from ..model3d import build_model
+
+        return build_model(project, cell, dz, datum=datum, boundary=boundary, dem=dem)
+
     def build_model(self):
         if not self.need_project():
             return
-        from ..model3d import build_model
-
         cell = self.p_cell.value() or None
         dz = self.p_dz.value() or None
         b = self.boundary if self.p_clipb.isChecked() else None
+        dem = self.dem if (self.dem is not None and self.p_usedem.isChecked()) else None
+        self._dem_report = None
 
         def done(model):
             self.model = model
             self._refresh_tree()
             nz, ny, nx = model.lith.shape
-            self.log(f"Model built: {nx} × {ny} × {nz} voxels ({model.cell:g} × {model.cell:g} × {model.dz:g} m)"
+            kind = "Horizon model" if getattr(model, "kind", "") == "horizon" else "Voxel model"
+            self.log(f"{kind} built: {nx} × {ny} × {nz} cells ({model.cell:g} × {model.cell:g} × {model.dz:g} m)"
                      + (f"; clipped to study area, {100 * (1 - model.coverage):.0f} % beyond borehole cover"
                         if model.coverage is not None else ""))
+            if getattr(model, "kind", "") == "horizon":
+                self.log(f"  {len(model.horizons)} horizons traced between the boreholes: "
+                         + "; ".join(model.h_labels))
+                if model.h_note:
+                    self.log("  Note: " + model.h_note)
+            if self._dem_report:
+                n, mean, mx = self._dem_report
+                self.log(f"  DEM: collar − DEM difference mean {mean:+.1f} m, max {mx:.1f} m over {n} holes"
+                         + (" (collars replaced by the DEM)" if self.p_rectify.isChecked() else ""))
             self.redraw(reset_view=True)
             self._fill_volumes(getattr(self, "_pending_sy", None) or None)
             self._pending_sy = None
             self.docs.setCurrentWidget(self.viewer)
 
-        self.run("Building 3D model", build_model, done, self.project, cell, dz,
-                 datum=self.p_datum.currentData(), boundary=b)
+        self.run("Building 3D model", self._build, done, self.project, self.p_method.currentData(), cell, dz,
+                 self.p_datum.currentData(), self.p_grid.currentData(), b, dem, self.p_rectify.isChecked())
 
     def _auto_ve(self):
         m = self.model
@@ -548,6 +722,13 @@ class MainWindow(QMainWindow):
             tag = it.data(0, Qt.UserRole) if it is not root else None
             if tag and tag[0] == "unit" and it.checkState(0) != Qt.Checked:
                 self.viewer.set_unit_visible(tag[1], False)
+        for code, st in self.layer_state.items():
+            if not st.get("visible", True):
+                self.viewer.set_unit_visible(code, False)
+        self.viewer.set_opacity(self.p_opacity.value() / 100, self._unit_opacity())
+        if self.ribbon.buttons["sh_terrain"].isChecked() and self.dem is not None:
+            self.viewer.show_terrain(self.dem, self.model, ve)
+        self._update_legend()
         self.viewer.plotter.render()
         self.ribbon.buttons["clip"].setChecked(False)
 
@@ -618,6 +799,8 @@ class MainWindow(QMainWindow):
                 it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.vol.setItem(r, c, it)
         self.vol.blockSignals(False)
+        self._fill_horizons()
+        self._update_legend()
         note = "MCM = million m³, ground to base of drilling"
         if m.boundary is not None:
             note += f", inside the study area ({m.boundary.area / 1e6:,.1f} km²)"
@@ -627,6 +810,178 @@ class MainWindow(QMainWindow):
         if item.column() == 3 and self.model is not None:
             self._fill_volumes(self._sy())
 
+    def _fill_horizons(self):
+        m = self.model
+        horizons = getattr(m, "kind", "") == "horizon"
+        self.vtabs.setTabEnabled(1, horizons)
+        if not horizons:
+            self.hvol.setRowCount(0)
+            return
+        from ..horizons import horizon_volumes
+
+        hv = horizon_volumes(m)
+        self.hvol.setRowCount(len(hv))
+        for r, (_, row) in enumerate(hv.iterrows()):
+            lt = self.project.legend.get(row["code"])
+            it = QTableWidgetItem(swatch(lt.color), f"{row['horizon']}. {row['layer']}")
+            self.hvol.setItem(r, 0, it)
+            for c, val in ((1, f"{row['holes_present']}"), (2, f"{row['mean_thickness_m']:.1f}"),
+                           (3, f"{row['area_present_pct']:.0f}"), (4, f"{row['volume_mcm']:,.1f}")):
+                it = QTableWidgetItem(val)
+                it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.hvol.setItem(r, c, it)
+
+    def _update_legend(self):
+        if self.model is None or self.project is None:
+            self.viewer.legend.set_items([])
+            return
+        vols = self.model.volumes()
+        vol = dict(zip(vols["code"], vols["volume_mcm"]))
+        shown = [s.code for s in (self.solids or [])] or list(self.model.codes)
+        items = [dict(code=c, name=self.project.legend.get(c).name, color=self.project.legend.get(c).color,
+                      volume=vol.get(c), visible=self.layer_state.get(c, {}).get("visible", True))
+                 for c in self.model.codes if c in shown]
+        sub = "Volumes in MCM (million m³), ground to base of drilling"
+        if self.model.boundary is not None:
+            sub += f", within the study area ({self.model.boundary.area / 1e6:,.1f} km²)"
+        if getattr(self.model, "kind", "") == "horizon":
+            sub += f" · {len(self.model.horizons)} correlated horizons"
+        self.viewer.legend.set_items(items, sub)
+
+    def layer_properties(self, code=None):
+        if not self.need_project():
+            return
+        from .legendbar import LayerPropertiesDialog
+
+        codes = list(self.model.codes) if self.model is not None else \
+            list(dict.fromkeys(c for c in self.project.lithology["code"] if c))
+        vols = {}
+        if self.model is not None:
+            v = self.model.volumes()
+            vols = dict(zip(v["code"], v["volume_mcm"]))
+        dlg = LayerPropertiesDialog(self.project.legend, codes, self.layer_state, code, vols, self)
+
+        def apply():
+            self.project.legend = self.project.legend.updated(dlg.rows())
+            self._legend_rows = {r["code"]: r for r in dlg.rows()}
+            for c, e in dlg.edits.items():
+                self.layer_state[c] = {"visible": e["visible"], "opacity": e["opacity"]}
+                self.viewer.set_unit_color(c, e["color"])
+                self.viewer.set_unit_visible(c, e["visible"])
+            self.viewer.set_opacity(self.p_opacity.value() / 100, self._unit_opacity())
+            self._refresh_tree()
+            if self.model is not None:
+                self._fill_volumes(self._sy())
+            for fn in list(self._redo.values()):  # redraw open logs, sections, maps with the new legend
+                try:
+                    fn()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"Could not redraw: {e}")
+            self.viewer.plotter.render()
+            self.log("Layer properties applied.")
+
+        dlg.apply_btn.clicked.connect(apply)
+        if dlg.exec() == QDialog.Accepted:
+            apply()
+
+    def open_dem(self):
+        if not self.need_project():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Open DEM", "",
+                                              "DEM (*.tif *.tiff *.asc);;GeoTIFF (*.tif *.tiff);;ESRI ASCII (*.asc)")
+        if path:
+            self._load_dem(path, rebuild=True)
+
+    def _load_dem(self, path, rebuild=False):
+        import numpy as np
+
+        from ..dem import load_dem, sample
+
+        try:
+            dem = load_dem(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "DEM", str(e))
+            return
+        b = self.project.boreholes.dropna(subset=["x", "y"])
+        crs = None
+        if dem.crs is not None and dem.crs.is_geographic and len(b):
+            from ..aquifer import utm_epsg
+            from ..dem import MODEL_CRS
+
+            lon = dem.x0 + dem.z.shape[1] * dem.dx / 2
+            lat = dem.y0 - dem.z.shape[0] * dem.dy / 2
+            crs = MODEL_CRS["crs"] = f"EPSG:{utm_epsg(lon, lat)}"
+        z = sample(dem, b["x"], b["y"], crs) if len(b) else np.array([])
+        n_in = int(np.isfinite(z).sum())
+        if len(b) and n_in == 0:
+            QMessageBox.warning(self, "DEM", "The DEM does not cover the boreholes. Check that it is in the "
+                                             "boreholes' coordinate system or in latitude/longitude.")
+            return
+        self.dem, self.dem_path = dem, path
+        self.p_usedem.setEnabled(True)
+        self.p_rectify.setEnabled(True)
+        if rebuild:
+            self.p_usedem.setChecked(True)
+        d = (b["elevation"].to_numpy(float) - z)[np.isfinite(z)]
+        self.log(f"DEM {Path(path).name}: {dem.z.shape[1]} × {dem.z.shape[0]} cells, "
+                 f"{np.nanmin(dem.z):.0f}–{np.nanmax(dem.z):.0f} m; covers {n_in} of {len(b)} boreholes"
+                 + (f"; collar − DEM mean {np.nanmean(d):+.1f} m, max |{np.nanmax(np.abs(d)):.1f}| m"
+                    if np.isfinite(d).any() else ""))
+        self._refresh_tree()
+        if rebuild:
+            self.ribbon.buttons["sh_terrain"].setChecked(True)
+            self.build_model()
+
+    # ------------------------------------------------------------------ view
+    def set_theme(self, mode):
+        from PySide6.QtWidgets import QApplication
+
+        theme.apply(QApplication.instance(), mode)
+        theme.save_mode(mode)
+        self.ribbon.buttons["th_dark"].setChecked(mode == "dark")
+        self.ribbon.buttons["th_light"].setChecked(mode == "light")
+        self.ribbon.refresh_icons()
+        for k, ic in enumerate(getattr(self, "_doc_icons", [])):
+            self.docs.setTabIcon(k, theme.icon(ic, theme.TEXT_DIM))
+        for d in (self.doc_log, self.doc_sec, self.doc_fence, self.doc_map, self.doc_fract):
+            d.apply_theme()
+        self.build_btn.setIcon(theme.icon("mdi6.cube-outline", theme.ON_ACCENT))
+        self.viewer.apply_theme()
+        self._refresh_tree()
+        if self.model is not None:
+            self._fill_volumes(self._sy())
+            self.redraw()
+
+    def set_bg(self, name):
+        for k in ("theme", "white", "sky", "black"):
+            self.ribbon.buttons[f"bg_{k}"].setChecked(k == name)
+        self.viewer.set_background(name)
+        if self.model is not None:
+            self.redraw()
+
+    def toggle_legend(self, on):
+        self.viewer.legend.set_enabled_bar(on)
+
+    def toggle_grid(self, on):
+        self.viewer.set_axes_grid(on)
+
+    def toggle_terrain(self, on):
+        if self.model is None:
+            return
+        if on and self.dem is None:
+            self.ribbon.buttons["sh_terrain"].setChecked(False)
+            QMessageBox.information(self, "Terrain", "Load a DEM first (Home ▸ DEM).")
+            return
+        if on:
+            self.viewer.show_terrain(self.dem, self.model, self.viewer.ve)
+        else:
+            self.viewer.remove("terrain")
+            try:
+                self.viewer.plotter.remove_scalar_bar("DEM elevation (m)")
+            except Exception:  # noqa: BLE001
+                pass
+            self.viewer.plotter.render()
+
     # ------------------------------------------------------------------ 2D documents
     def show_striplog(self, checked=False, bid=None):
         if not self.need_project():
@@ -634,9 +989,13 @@ class MainWindow(QMainWindow):
         from ..striplog import Style, striplog_pages
 
         bid = bid or self._selected_borehole()
-        fig = next(iter(striplog_pages(self.project.borehole(bid), self.project.legend,
-                                       Style(project_name=self._title()))))
-        self.doc_log.set_figure(fig)
+
+        def make():
+            return next(iter(striplog_pages(self.project.borehole(bid), self.project.legend,
+                                            Style(project_name=self._title()))))
+
+        self.doc_log.set_figure(make())
+        self._redo[self.doc_log] = lambda: self.doc_log.set_figure(make())
         self.docs.setCurrentWidget(self.doc_log)
         self.log(f"Strip log {bid}.")
 
@@ -673,12 +1032,17 @@ class MainWindow(QMainWindow):
 
         try:
             line = through_boreholes(self.project, ids, name)
-            fig = section_figure(self.project, line, ve=ve or None, title=self._title(), datum=datum,
-                                 style=style, curve=curve)
+
+            def make():
+                return section_figure(self.project, line, legend=self.project.legend, ve=ve or None,
+                                      title=self._title(), datum=datum, style=style, curve=curve)
+
+            fig = make()
         except ValueError as e:
             QMessageBox.warning(self, "Section", str(e))
             return
         self.doc_sec.set_figure(fig)
+        self._redo[self.doc_sec] = lambda: self.doc_sec.set_figure(make())
         self.docs.setCurrentWidget(self.doc_sec)
         self.log(f"Section {name}: {len(ids)} boreholes, {line.length:,.0f} m.")
 
@@ -690,6 +1054,8 @@ class MainWindow(QMainWindow):
         edges = network_edges(self.project, None, "mst")
         fig = fence_figure(self.project, edges, title=self._title())
         self.doc_fence.set_figure(fig)
+        self._redo[self.doc_fence] = lambda: self.doc_fence.set_figure(
+            fence_figure(self.project, edges, title=self._title()))
         self.docs.setCurrentWidget(self.doc_fence)
         self.log(f"Fence diagram: {len(edges)} panels.")
 
@@ -709,10 +1075,13 @@ class MainWindow(QMainWindow):
         except ValueError as e:
             QMessageBox.warning(self, "Map", str(e))
             return
-        fig = map_figure(g, vals, attr, legend=self.project.legend, method=method, title=self._title(),
-                         all_xy=self.project.boreholes)
+        def make():
+            return map_figure(g, vals, attr, legend=self.project.legend, method=method, title=self._title(),
+                              all_xy=self.project.boreholes)
+
         self._current_map = g
-        self.doc_map.set_figure(fig)
+        self.doc_map.set_figure(make())
+        self._redo[self.doc_map] = lambda: self.doc_map.set_figure(make())
         self.docs.setCurrentWidget(self.doc_map)
         self.log(f"Map {attr} ({method}).")
 
@@ -755,6 +1124,7 @@ class MainWindow(QMainWindow):
         vals = wt.wells.rename(columns={"well_id": "borehole_id"})
         fig = map_figure(wt.grid, vals.assign(value=vals["wt"]), "water", title=f"{self._title()} · {reading}")
         self.doc_map.set_figure(fig)
+        self._redo.pop(self.doc_map, None)
         self.viewer.show_surface(self.model, wt.grid.z, self.viewer.ve, name="water_table",
                                  label=f"Water table · {reading}")
         if self.p_opacity.value() > 45:  # see the water table through the solids

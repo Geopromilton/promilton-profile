@@ -23,11 +23,11 @@ def _rel(p, base: Path):
         return str(Path(p).resolve())
 
 
-def save(path, name, data, legend=None, boundary=None, settings=None):
+def save(path, name, data, legend=None, boundary=None, settings=None, dem=None):
     path = Path(path)
     base = path.resolve().parent
     doc = {"format": FORMAT, "version": VERSION, "name": name, "data": _rel(data, base),
-           "legend": _rel(legend, base), "boundary": _rel(boundary, base), "settings": settings or {}}
+           "legend": _rel(legend, base), "boundary": _rel(boundary, base), "dem": _rel(dem, base), "settings": settings or {}}
     path.write_text(json.dumps(doc, indent=2))
     return path
 
@@ -38,7 +38,7 @@ def load(path) -> dict:
     if doc.get("format") != FORMAT:
         raise ValueError(f"{path.name} is not a LithoLog project file")
     base = path.resolve().parent
-    for k in ("data", "legend", "boundary"):
+    for k in ("data", "legend", "boundary", "dem"):
         if doc.get(k):
             p = Path(doc[k])
             doc[k] = str(p if p.is_absolute() else (base / p).resolve())

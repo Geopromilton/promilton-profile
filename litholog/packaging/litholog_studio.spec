@@ -17,7 +17,8 @@ _keep = lambda n: not n.startswith(_SKIP)  # noqa: E731 - optional parts pull in
 hidden = (collect_submodules("vtkmodules", filter=_keep) + collect_submodules("pyvista", filter=_keep)
           + collect_submodules("pyvistaqt")
           + collect_submodules("skimage.measure") + ["shapefile", "scipy.spatial", "scipy.ndimage",
-          "scipy.optimize", "openpyxl", "pyproj.database", "matplotlib.backends.backend_qtagg"])
+          "scipy.optimize", "openpyxl", "pyproj.database", "matplotlib.backends.backend_qtagg",
+          "PySide6.QtSvg", "tifffile", "imagecodecs", "PIL.Image", "xml.etree.ElementTree"])
 
 a = Analysis([str(ROOT / "packaging" / "studio_main.py")], pathex=[str(ROOT)], datas=datas,
              hiddenimports=hidden, excludes=["tkinter", "streamlit", "IPython", "jupyter", "pytest", "trame",

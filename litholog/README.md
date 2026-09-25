@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo.svg">
+    <img src="docs/logo_light.svg" alt="LithoLog" width="520">
+  </picture>
+</p>
+
 # LithoLog
 
 **Free, open-source borehole logging for geologists, hydrogeologists and geotechnical engineers.**
@@ -126,56 +133,91 @@ opens in QGIS, ArcGIS or Surfer, plus a CSV of the borehole values.
 
 ![Water-table map](docs/map_demo.png)
 
-## 3D block model, volumes and groundwater storage
+## 3D geological model, volumes and groundwater storage
 
 ```bash
-litholog model data.xlsx --sy FRAC=0.015 --only FRAC
+litholog model data.xlsx --sy 4=0.015 --only 4
 ```
 
-Builds a voxel model in which each voxel takes the lithology favoured by an inverse-distance vote of
-the boreholes, bounded by the ground surface, the base of drilling and the boreholes' outline.
+**Horizon method (default, `--method horizons`)** — like GMS *Horizons → Solids*:
 
-* `--datum depth` (default) compares holes at equal depth below ground, so layers follow the land
-  surface — suited to weathered / fractured hard-rock aquifers. `--datum elevation` compares them
-  at equal elevation — suited to flat-lying sediments.
-* Volumes are summed from the vote *proportions*, not only the winning lithology, so thin units
-  are not under-counted; they agree with the isopach (thickness-map) volume.
-* `--sy CODE=value` adds groundwater storage = volume × specific yield (your estimate) per unit.
+1. Every layer is traced from hole to hole by aligning the borehole sequences (multiple-sequence
+   alignment on lithology and depth). A unit that occurs more than once — e.g. two or three
+   water-bearing fracture zones at different depths — becomes separate horizons
+   ("Fractured layer · zone 1, zone 2 …").
+2. The thickness of each horizon is interpolated as a surface (`--grid-method idw|kriging|linear`),
+   with zero where it pinches out between holes.
+3. Horizons are stacked from the ground surface (DEM or collars) down to the base of drilling, so
+   surfaces never cross and thin layers stay **continuous** instead of breaking into isolated lenses.
+4. Volumes are integrated exactly from the thickness grids; per-horizon volumes, mean thickness and
+   area covered go to `horizons.csv`. Solids are meshed straight from the horizon surfaces.
+
+**Voxel method (`--method voxel`)** — each voxel takes the lithology favoured by an inverse-distance
+vote of the boreholes (`--datum depth|elevation`); better for irregular bodies and lenses that do
+not continue between holes. Volumes use the vote proportions so thin units are not under-counted.
+
+`--sy CODE=value` adds groundwater storage = volume × specific yield (your estimate) per unit.
 
 Outputs (default `--style smooth`):
 
 * `solid_3d.html` — interactive 3D model (rotate, zoom, hide units by clicking the legend); opens
   in any browser, no installation needed.
-* Smooth solids like GMS: each lithology is a closed, lit surface (marching cubes on the smoothed
-  borehole vote), with the top following the real ground surface — not voxel steps.
 * Standard views as PNG and on one sheet (`solid_views.pdf`): oblique from SW / NE (with a cut-away
   corner showing the interior), top (plan), front, back, left and right (orthographic).
   Choose with `--views top front oblique_se ...`; `--cutaway ne|nw|se|none`.
-* `--only CODE` also draws that unit alone, sized to its reported volume.
-* Horizontal slices, `volumes.csv`, and `model.vtk` for ParaView. `--style blocks` gives the voxel
-  (block) rendering instead; `--style both` gives both.
+* `--only CODE` also draws that unit alone.
+* Horizontal slices, `volumes.csv`, `horizons.csv` and `model.vtk` for ParaView. `--style blocks`
+  gives the voxel (block) rendering instead; `--style both` gives both.
 
 PNG export uses Chrome/Chromium through Kaleido; if none is found, the HTML is still written
 (run `plotly_get_chrome` once to install one).
 
 ![Block model](docs/model_demo.png)
 
-## Study-area boundary (shapefile)
+## Study-area boundary (shapefile, KML/KMZ, GeoJSON)
 
 ```bash
-litholog map   data.xlsx -a thickness:FRAC --boundary study_area.shp
-litholog model data.xlsx --sy FRAC=0.015 --boundary study_area.shp
+litholog map   data.xlsx -a thickness:4 --boundary study_area.shp
+litholog model data.xlsx --sy 4=0.015 --boundary study_area.kmz
 ```
 
-Maps and the block model then cover and are clipped to the polygon (multi-part polygons and holes
-are supported), volumes and storage are totalled inside it, and the outline is drawn on maps, slices
-and 3D views. The share of the study area lying beyond the boreholes (where values are extrapolated)
-is reported.
+Boundaries can be a shapefile (`.shp` with `.prj`, or zipped), a Google Earth `.kml` / `.kmz`, or
+`.geojson`. Maps and the model then cover and are clipped to the polygon (multi-part polygons and
+holes are supported), volumes and storage are totalled inside it, and the outline is drawn on maps,
+slices and 3D views. The share of the study area lying beyond the boreholes (extrapolated) is reported.
 
-The shapefile's `.prj` is used to reproject the boundary into the boreholes' coordinates. Give the
-boreholes' system with `--crs EPSG:32643`; if you don't and the boundary is in a UTM zone that does
-not overlap the boreholes, the neighbouring UTM zone that does is used (and reported) — a common
-mix-up near zone edges.
+The boundary is reprojected into the boreholes' coordinates. Give the boreholes' system with
+`--crs EPSG:32643`; otherwise KML/GeoJSON (latitude/longitude) are put into the UTM zone that
+matches the boreholes, and a UTM shapefile in the wrong zone is moved to the neighbouring zone that
+overlaps them (both reported).
+
+## Digital elevation model (DEM)
+
+```bash
+litholog model data.xlsx --dem srtm.tif --boundary study_area.kmz [--rectify]
+```
+
+A GeoTIFF (SRTM, ALOS, CartoDEM, … in any coordinate system, including latitude/longitude) or an
+ESRI ASCII grid becomes the ground surface of the model, so the top of every layer follows the real
+terrain between boreholes. The collar elevations are compared with the DEM and the differences
+reported; `--rectify` replaces them by the DEM values. In LithoLog Studio the terrain around the
+model can also be shown in 3D (View ▸ Terrain).
+
+## LithoLog Studio (Windows desktop app)
+
+A ribbon interface with project tree, properties and message panels; everything runs locally.
+
+* **3D model** with lit solids, borehole tubes, labels, study-area outline, cut-away corners and an
+  interactive cutting plane; standard views (oblique, top, front, back, left, right).
+* **Legend bar** under the 3D view: colour, name and volume of each layer. Click a layer to edit it,
+  right-click to hide / show / isolate it, double-click the title to rename the legend. Saved images
+  include the legend.
+* **Layer properties**: colour picker, name, 2D pattern (with preview), group, 3D opacity and
+  visibility; save / load the legend as CSV. Changes update the 3D view, logs, sections and maps.
+* **Volumes** by layer and by horizon, with specific yield → storage.
+* **View** tab: dark or light theme (remembered), 3D background (theme, white, sky, black), legend
+  bar, axes grid, DEM terrain.
+* Projects (`.llproj`) keep data, legend, boundary, DEM and all settings.
 
 ## Groundwater, properties, layers, chemistry and fractures
 
@@ -213,8 +255,9 @@ litholog validate DATA                       check for overlaps, gaps, bad depth
 litholog striplog DATA [-o DIR] [-f pdf|png|svg] [-b BH1 BH2] [-m 50] [--title NAME]
 litholog section DATA (-b IDS | --line X,Y ... | -s FILE) [--ve N] [--page A3|A4]
 litholog fence DATA [--network mst|delaunay|sections] [--views N] [-o fence.pdf]
-litholog map DATA -a ATTR ... [-m idw|linear|kriging] [--cell M] [--boundary SHP [--crs EPSG]]
-litholog model DATA [--datum depth|elevation] [--sy CODE=SY ...] [--only CODE ...] [--boundary SHP]
+litholog map DATA -a ATTR ... [-m idw|linear|kriging] [--cell M] [--boundary SHP|KML|KMZ|GEOJSON [--crs EPSG]]
+litholog model DATA [--method horizons|voxel] [--grid-method idw|kriging|linear] [--dem DEM.tif [--rectify]]
+                    [--datum depth|elevation] [--sy CODE=SY ...] [--only CODE ...] [--boundary FILE]
 litholog convert DATA [OUT.xlsx] [-l LEGEND] turn GMS text / CSV folder into a workbook
 litholog legend [DATA] [-o legend.pdf]       list / draw the lithology legend
 
@@ -253,6 +296,8 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 - [x] **M4** Browser app, smooth 3D solids with standard views, interactive 3D viewer
 - [x] **M5** Desktop app (LithoLog Studio) with Windows installer; aquifer/storage, property models,
       stratigraphy, hydrochemistry, fractures, log sections
+- [x] **M6** Horizon-based modelling (continuous thin layers), DEM ground surface and terrain,
+      KML/KMZ/GeoJSON boundaries, layer properties, editable legend bar, dark/light themes, logo
 - [ ] Next: KMZ/DXF export, faults, database connection
 
 ## Development

@@ -524,3 +524,115 @@ def test_log_section_and_new_cli(tmp_path):
     assert main(["fractures", str(SAMPLE), "-o", str(out / "fr.pdf")]) == 0
     assert main(["strat", str(SAMPLE), "--order", "RSOIL", "WGRA", "GRA", "-o", str(out / "strat")]) == 0
     assert (out / "strat" / "volumes.csv").exists()
+
+
+def _fractured_project(tmp_path):
+    """Hard-rock profile with two thin water-bearing fracture zones (code 4) whose depth varies
+    from hole to hole, inside massive rock (3): the case an indicator model breaks up."""
+    rows = ["Name\tX\tY\tZ\tMaterial"]
+    rng = np.random.default_rng(7)
+    for k in range(16):
+        x, y = rng.uniform(0, 3000, 2)
+        g = 120 + x / 200
+        d1, d2 = rng.uniform(15, 35), rng.uniform(50, 75)        # fracture zones wander in depth
+        tops = [(0, "1"), (3, "2"), (10, "3"), (d1, "4"), (d1 + 3, "3"), (d2, "4"), (d2 + 3, "3"), (100, "3")]
+        rows += [f"B{k}\t{x:.1f}\t{y:.1f}\t{g - d:.2f}\t{m}" for d, m in tops]
+    f = tmp_path / "fr.txt"
+    f.write_text("\n".join(rows) + "\n")
+    return load_project(f)
+
+
+def test_horizon_model_keeps_thin_repeated_layers_continuous(tmp_path):
+    from litholog.horizons import build_horizon_model, horizon_volumes
+    from litholog.solid import build_solids
+
+    proj = _fractured_project(tmp_path)
+    m = build_horizon_model(proj, cell=100)
+    hv = horizon_volumes(m)
+    zones = hv[hv["code"] == "4"]
+    assert len(zones) == 2 and (zones["holes_present"] == 16).all()      # both zones traced in every hole
+    assert (zones["area_present_pct"] > 99).all()                         # continuous sheets, no lenses
+    area = m.inside.sum() * m.cell ** 2
+    assert np.allclose(zones["volume_mcm"] * 1e6 / area, 3.0, atol=0.05)  # 3 m thick each
+    # surfaces never cross and the stack reaches the base of drilling
+    for k in range(len(m.horizons)):
+        assert np.all(m.h_bot[k][m.inside] <= m.h_top[k][m.inside] + 1e-9)
+    assert np.allclose(hv["volume_mcm"].sum() * 1e6, (np.where(m.inside, m.ground - m.h_bot[-1], 0)).sum()
+                       * m.cell ** 2, rtol=1e-6)
+    assert {s.code for s in build_solids(m, cutaway="sw")} == {"1", "2", "3", "4"}
+
+
+def test_dem_ascii_and_geotiff(tmp_path):
+    import tifffile
+
+    from litholog.dem import load_dem, sample
+
+    z = np.arange(12, dtype=float).reshape(3, 4) * 10     # row 0 = north
+    (tmp_path / "d.asc").write_text("ncols 4\nnrows 3\nxllcorner 1000\nyllcorner 2000\ncellsize 10\n"
+                                    "NODATA_value -9999\n" + "\n".join(" ".join(f"{v:g}" for v in r) for r in z))
+    a = load_dem(tmp_path / "d.asc")
+    assert sample(a, [1005], [2025])[0] == 0            # centre of the NW cell
+    assert sample(a, [1010], [2020])[0] == 25           # between four cells
+    geokeys = (1, 1, 0, 1, 3072, 0, 1, 32643)
+    tifffile.imwrite(tmp_path / "d.tif", z.astype(np.float32),
+                     extratags=[(33550, "d", 3, (10.0, 10.0, 0.0)), (33922, "d", 6, (0, 0, 0, 1000, 2030, 0)),
+                                (34735, "H", len(geokeys), geokeys)])
+    t = load_dem(tmp_path / "d.tif")
+    assert t.crs.to_epsg() == 32643
+    assert np.isclose(sample(t, [1010], [2020])[0], 25)
+    assert np.isnan(sample(t, [0], [0])[0])
+
+
+def test_boundary_kml_kmz_geojson(tmp_path):
+    import json
+    import zipfile
+
+    from litholog.boundary import load_boundary
+
+    outer = [(77.50, 8.30), (77.60, 8.30), (77.60, 8.40), (77.50, 8.40), (77.50, 8.30)]
+    hole = [(77.54, 8.34), (77.56, 8.34), (77.56, 8.36), (77.54, 8.36), (77.54, 8.34)]
+    c = lambda r: " ".join(f"{x},{y},0" for x, y in r)  # noqa: E731
+    kml = ('<?xml version="1.0"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><Placemark><Polygon>'
+           f'<outerBoundaryIs><LinearRing><coordinates>{c(outer)}</coordinates></LinearRing></outerBoundaryIs>'
+           f'<innerBoundaryIs><LinearRing><coordinates>{c(hole)}</coordinates></LinearRing></innerBoundaryIs>'
+           '</Polygon></Placemark></Document></kml>')
+    (tmp_path / "b.kml").write_text(kml)
+    with zipfile.ZipFile(tmp_path / "b.kmz", "w") as z:
+        z.writestr("doc.kml", kml)
+    (tmp_path / "b.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [outer, hole]}}]}))
+    areas = []
+    for name in ("b.kml", "b.kmz", "b.geojson"):
+        b = load_boundary(tmp_path / name, crs="EPSG:32643")
+        assert len(b.rings) == 2
+        areas.append(b.area)
+    assert np.allclose(areas, areas[0]) and 110e6 < areas[0] < 125e6     # ~11 km x 11 km minus the hole
+    # without --crs: lon/lat is matched to the boreholes' UTM zone automatically
+    bx0, bx1, by0, by1 = load_boundary(tmp_path / "b.kml", crs="EPSG:32643").bbox
+    auto = load_boundary(tmp_path / "b.geojson", near=(bx0 + 1000, bx1 - 1000, by0 + 1000, by1 - 1000))
+    assert "EPSG:32643" in auto.crs_note and np.isclose(auto.area, areas[0])
+
+
+def test_legend_save_roundtrip(tmp_path):
+    from litholog.io import load_legend, save_legend
+
+    lg = Legend().updated([{"code": "4", "name": "Fractured zone", "color": "#123456", "pattern": "waves+fractures"}])
+    save_legend(lg, tmp_path / "l.csv", ["4", "GRA"])
+    back = load_legend(tmp_path / "l.csv")
+    assert back.get("4").color == "#123456" and back.get("4").pattern == "waves+fractures"
+    assert back.get("GRA").name == Legend().get("GRA").name
+
+
+def test_cli_model_horizons_with_dem(tmp_path):
+    proj = _fractured_project(tmp_path)
+    b = proj.boreholes
+    x0, y0 = b["x"].min() - 500, b["y"].min() - 500
+    nx = ny = 50
+    (tmp_path / "dem.asc").write_text(f"ncols {nx}\nnrows {ny}\nxllcorner {x0}\nyllcorner {y0}\ncellsize 100\n"
+                                      "NODATA_value -9999\n" + "\n".join(" ".join("130" for _ in range(nx))
+                                                                          for _ in range(ny)))
+    out = tmp_path / "m"
+    assert main(["model", str(tmp_path / "fr.txt"), "--dem", str(tmp_path / "dem.asc"), "--rectify",
+                 "--views", "top", "--style", "smooth", "-o", str(out)]) == 0
+    hv = pd.read_csv(out / "horizons.csv")
+    assert (hv[hv["code"] == 4]["holes_present"] == 16).all()

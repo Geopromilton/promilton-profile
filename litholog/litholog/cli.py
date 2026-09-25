@@ -79,7 +79,7 @@ def main(argv=None) -> int:
     mp.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
     mp.add_argument("--cell", type=float, help="grid cell size in m (default: ~150 cells across)")
     mp.add_argument("--no-mask", action="store_true", help="grid the full rectangle, not just the borehole area")
-    mp.add_argument("--boundary", help="study-area polygon shapefile (.shp) to clip the maps to")
+    mp.add_argument("--boundary", help="study-area polygon (.shp, zipped .shp, .kml, .kmz, .geojson) to clip the maps to")
     mp.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643 "
                                   "(default: match the boundary automatically)")
     mp.add_argument("-o", "--out", default="maps", help="output folder (default: maps)")
@@ -92,12 +92,18 @@ def main(argv=None) -> int:
     md.add_argument("data")
     md.add_argument("--cell", type=float, help="horizontal voxel size (m)")
     md.add_argument("--dz", type=float, help="vertical voxel size (m)")
+    md.add_argument("--method", default="horizons", choices=["horizons", "voxel"],
+                    help="horizons: layers correlated between holes and stacked (continuous layers, default); voxel: indicator interpolation")
+    md.add_argument("--grid-method", default="idw", choices=["idw", "linear", "kriging"],
+                    help="interpolation of horizon thickness (horizons method)")
+    md.add_argument("--dem", help="DEM (GeoTIFF .tif or ESRI .asc) used as the ground surface")
+    md.add_argument("--rectify", action="store_true", help="replace collar elevations with the DEM")
     md.add_argument("--datum", default="depth", choices=["depth", "elevation"],
                     help="correlate at equal depth below ground (default; weathered/fractured "
                          "hard-rock aquifers) or equal elevation (flat-lying sediments)")
     md.add_argument("--only", nargs="+", metavar="CODE", help="also draw these units on their own")
     md.add_argument("--sy", nargs="+", metavar="CODE=SY", help="specific yield per unit, e.g. 4=0.015")
-    md.add_argument("--boundary", help="study-area polygon shapefile (.shp) to clip the model to")
+    md.add_argument("--boundary", help="study-area polygon (.shp, zipped .shp, .kml, .kmz, .geojson) to clip to")
     md.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643")
     md.add_argument("--ve", type=float, help="vertical exaggeration")
     md.add_argument("--azim", type=float, default=-60)
@@ -121,8 +127,10 @@ def main(argv=None) -> int:
     aq.add_argument("-r", "--reading", nargs="+", help="which readings/seasons (default: all)")
     aq.add_argument("--sy", nargs="+", metavar="CODE=SY", help="specific yield per unit, e.g. 4=0.015")
     aq.add_argument("--crs", help="coordinate system of borehole X/Y (for lat/lon wells), e.g. EPSG:32643")
-    aq.add_argument("--boundary", help="study-area polygon shapefile")
+    aq.add_argument("--boundary", help="study-area polygon (.shp, .kml, .kmz, .geojson)")
     aq.add_argument("--datum", default="depth", choices=["depth", "elevation"])
+    aq.add_argument("--model", default="horizons", choices=["horizons", "voxel"])
+    aq.add_argument("--dem", help="DEM used as the ground surface")
     aq.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
     aq.add_argument("-o", "--out", default="aquifer")
     aq.add_argument("--title")
@@ -138,6 +146,8 @@ def main(argv=None) -> int:
     pr.add_argument("--boundary")
     pr.add_argument("--crs")
     pr.add_argument("--datum", default="depth", choices=["depth", "elevation"])
+    pr.add_argument("--model", default="horizons", choices=["horizons", "voxel"])
+    pr.add_argument("--dem", help="DEM used as the ground surface")
     pr.add_argument("-o", "--out", default="property")
     pr.add_argument("--title")
 
@@ -389,7 +399,7 @@ def _model(a):
         code, _, val = item.partition("=")
         sy[code.strip().upper()] = float(val)
     boundary = _boundary(a, project)
-    model = build_model(project, a.cell, a.dz, datum=a.datum, boundary=boundary)
+    model = _build(a, project, boundary)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     kw = dict(title=a.title or project.name, sy=sy, ve=a.ve, azim=a.azim, elev=a.elev)
@@ -413,6 +423,15 @@ def _model(a):
     vols.insert(1, "name", [project.legend.get(c).name for c in vols["code"]])
     vols.to_csv(out / "volumes.csv", index=False)
     files += [out / "volumes.csv", write_vtk(model, out / "model.vtk")]
+    if getattr(model, "kind", "") == "horizon":
+        from .horizons import horizon_volumes
+
+        hv = horizon_volumes(model)
+        hv.to_csv(out / "horizons.csv", index=False)
+        files.append(out / "horizons.csv")
+        print(f"{len(hv)} horizons correlated between the boreholes (per-horizon volumes in horizons.csv)")
+        if model.h_note:
+            print("Note: " + model.h_note)
     nz, ny, nx = model.lith.shape
     print(f"Model {nx} x {ny} x {nz} voxels ({model.cell:g} x {model.cell:g} x {model.dz:g} m), datum: {a.datum}")
     if boundary is not None:
@@ -425,6 +444,32 @@ def _model(a):
     for f in files:
         print(f"  {f}")
     return 0
+
+
+def _build(a, project, boundary):
+    """Lithology model per --method/--model (horizons by default) with optional --dem."""
+    dem = None
+    if getattr(a, "dem", None):
+        from .dem import MODEL_CRS, load_dem, rectify_collars
+
+        dem = load_dem(a.dem)
+        MODEL_CRS["crs"] = getattr(a, "crs", None)
+        rep = rectify_collars(project, dem, replace=getattr(a, "rectify", False))
+        d = rep["difference"].dropna()
+        if len(d):
+            print(f"DEM {dem.name}: collar - DEM difference mean {d.mean():+.1f} m, max |{d.abs().max():.1f}| m"
+                  + (" (collars replaced by DEM)" if getattr(a, "rectify", False) else ""))
+    method = getattr(a, "method", None) if getattr(a, "method", None) in ("horizons", "voxel") \
+        else getattr(a, "model", "voxel")
+    if method == "horizons":
+        from .horizons import build_horizon_model
+
+        return build_horizon_model(project, getattr(a, "cell", None), getattr(a, "dz", None),
+                                   method=getattr(a, "grid_method", "idw"), boundary=boundary, dem=dem)
+    from .model3d import build_model
+
+    return build_model(project, getattr(a, "cell", None), getattr(a, "dz", None), datum=a.datum,
+                       boundary=boundary, dem=dem)
 
 
 def _boundary(a, project):
@@ -469,7 +514,7 @@ def _aquifer(a):
         return 2
     if wells.note:
         print(f"Wells: {wells.note}")
-    model = build_model(project, datum=a.datum, boundary=boundary)
+    model = _build(a, project, boundary)
     sy = _sy(a.sy)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -518,7 +563,7 @@ def _property(a):
         print("Downhole parameters: " + (", ".join(params) if params else "none (fill the Downhole sheet)"))
         return 0
     boundary = _boundary(a, project)
-    model = build_model(project, datum=a.datum, boundary=boundary)
+    model = _build(a, project, boundary)
     log = {"auto": None, "log": True, "linear": False}[a.scale]
     pm = build_property(project, model, a.parameter, a.anisotropy, log=log, datum=a.datum)
     out = Path(a.out)

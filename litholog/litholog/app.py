@@ -62,7 +62,7 @@ def sidebar():
     st.sidebar.title("🪨 LithoLog")
     st.sidebar.caption(f"Open-source borehole logging · v{litholog.__version__}")
     source = st.sidebar.radio("Data", ["Upload my data", "Demo data (synthetic)"], index=0)
-    data_up = legend_up = None
+    data_up = legend_up = dem_up = None
     bnd_ups = []
     if source == "Upload my data":
         data_up = st.sidebar.file_uploader(
@@ -72,9 +72,13 @@ def sidebar():
             "Legend (optional)", type=["csv", "xlsx"],
             help="Code, Name, Color, Pattern — names and colours for your lithology codes.")
         bnd_ups = st.sidebar.file_uploader(
-            "Study-area boundary (optional)", type=["zip", "shp", "shx", "dbf", "prj", "cpg"],
+            "Study-area boundary (optional)",
+            type=["zip", "shp", "shx", "dbf", "prj", "cpg", "kml", "kmz", "geojson", "json"],
             accept_multiple_files=True,
-            help="A zipped shapefile, or select the .shp, .shx, .dbf and .prj files together.")
+            help="Google Earth KML/KMZ, GeoJSON, a zipped shapefile, or the .shp, .shx, .dbf and .prj together.")
+        dem_up = st.sidebar.file_uploader(
+            "DEM (optional)", type=["tif", "tiff", "asc"],
+            help="GeoTIFF (e.g. SRTM/ALOS/CartoDEM) or ESRI ASCII grid, used as the ground surface of the model.")
     crs = st.sidebar.text_input("Borehole coordinate system (optional)", placeholder="e.g. EPSG:32643",
                                 help="Only needed if the boundary is in another system and cannot be "
                                      "matched automatically.")
@@ -108,9 +112,10 @@ def sidebar():
             if p.suffix.lower() == ".zip":
                 with zipfile.ZipFile(p) as z:
                     z.extractall(bfolder)
-        shps = sorted(bfolder.rglob("*.shp"))
+        shps = sorted(bfolder.rglob("*.shp")) or [p for ext in ("*.kml", "*.kmz", "*.geojson", "*.json")
+                                                  for p in sorted(bfolder.rglob(ext))]
         if not shps:
-            st.sidebar.error("No .shp file found in the boundary upload.")
+            st.sidebar.error("No .shp, .kml, .kmz or .geojson file found in the boundary upload.")
         else:
             b = project.boreholes.dropna(subset=["x", "y"])
             near = (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()) if len(b) else None
@@ -121,6 +126,16 @@ def sidebar():
                     st.sidebar.info(f"Study area: {note[0].upper()}{note[1:]}.")
             except Exception as e:  # noqa: BLE001 - show the reason to the user
                 st.sidebar.error(str(e))
+    dem = None
+    if dem_up is not None:
+        from litholog.dem import load_dem
+
+        try:
+            dem = load_dem(_save(dem_up, TMP / f"d_{_digest(dem_up.getvalue())}"))
+            st.sidebar.info(f"DEM {dem.name}: {dem.z.shape[1]} × {dem.z.shape[0]} cells")
+        except Exception as e:  # noqa: BLE001
+            st.sidebar.error(str(e))
+    project.dem = dem
     return project, boundary, key
 
 
@@ -343,10 +358,15 @@ def tab_maps(project, boundary, key, title):
 
 
 @st.cache_resource(show_spinner="Building the 3D model…")
-def _model(key, _project, _boundary, bkey, cell, dz, datum):
+def _model(key, _project, _boundary, bkey, cell, dz, datum, method="horizons", grid="idw", use_dem=False):
+    dem = getattr(_project, "dem", None) if use_dem else None
+    if method == "horizons":
+        from litholog.horizons import build_horizon_model
+
+        return build_horizon_model(_project, cell or None, dz or None, method=grid, boundary=_boundary, dem=dem)
     from litholog.model3d import build_model
 
-    return build_model(_project, cell or None, dz or None, datum=datum, boundary=_boundary)
+    return build_model(_project, cell or None, dz or None, datum=datum, boundary=_boundary, dem=dem)
 
 
 def tab_model(project, boundary, key, title):
@@ -356,7 +376,15 @@ def tab_model(project, boundary, key, title):
     c1, c2 = st.columns([1, 3])
     used, names = _codes(project)
     with c1:
-        datum = st.selectbox("Correlate holes at equal", ["depth", "elevation"],
+        method = st.selectbox("Method", ["horizons", "voxel"],
+                              format_func=lambda k: {"horizons": "Horizons – correlated layers",
+                                                     "voxel": "Voxel – indicator interpolation"}[k],
+                              help="Horizons traces each layer from hole to hole, so thin repeated layers "
+                                   "stay continuous (like GMS Horizons → Solids).")
+        grid = st.selectbox("Interpolation", ["idw", "kriging", "linear"], disabled=method != "horizons")
+        use_dem = st.checkbox("Use DEM as ground surface", value=getattr(project, "dem", None) is not None,
+                              disabled=getattr(project, "dem", None) is None)
+        datum = st.selectbox("Correlate holes at equal (voxel)", ["depth", "elevation"],
                              format_func=lambda d: {"depth": "Depth below ground (hard rock)",
                                                     "elevation": "Elevation (flat-lying sediments)"}[d])
         cell = st.number_input("Horizontal cell (m, 0 = auto)", 0.0, 1e5, 0.0, 50.0)
@@ -377,7 +405,9 @@ def tab_model(project, boundary, key, title):
             if v > 0:
                 sy[c] = v
     b = boundary if use_b else None
-    m = _model(key, project, b, "b" if b is not None else "", cell, dz, datum)
+    dem = getattr(project, "dem", None)
+    bkey = ("b" if b is not None else "") + (f"_dem_{dem.name}" if use_dem and dem is not None else "")
+    m = _model(key, project, b, bkey, cell, dz, datum, method, grid, use_dem)
     with c2:
         only = show if set(show) != set(used) else None
         solids = build_solids(m, smooth, None if cut == "none" else cut, only)
@@ -399,6 +429,15 @@ def tab_model(project, boundary, key, title):
             if m.coverage is not None and m.coverage < 0.999:
                 note += f"; {100 * (1 - m.coverage):.0f} % of it lies beyond the boreholes (extrapolated)"
         st.caption(note + ". Storage = volume × specific yield you enter (an estimate).")
+        if getattr(m, "kind", "") == "horizon":
+            from litholog.horizons import horizon_volumes
+
+            with st.expander(f"Volumes by horizon ({len(m.horizons)} layers traced between the boreholes)"):
+                hv = horizon_volumes(m)
+                st.dataframe(hv.drop(columns=["code"]).rename(columns={
+                    "horizon": "#", "layer": "Layer", "holes_present": "Holes", "mean_thickness_m": "Mean thick. (m)",
+                    "area_present_pct": "Area (%)", "volume_mcm": "Volume (MCM)"}).round(1),
+                    width="stretch", hide_index=True)
         d1, d2, d3 = st.columns(3)
         with d1:
             html = _out(key, "model_3d.html")

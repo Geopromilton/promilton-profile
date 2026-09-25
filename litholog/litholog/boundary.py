@@ -1,4 +1,4 @@
-"""Study-area boundaries from polygon shapefiles (with reprojection).
+"""Study-area boundaries: shapefile, KML/KMZ (Google Earth) or GeoJSON, with reprojection.
 
 Boreholes carry no coordinate system of their own, so the boundary is
 brought into theirs: either an explicit EPSG code (``crs=``) or, when the
@@ -96,39 +96,32 @@ def _ring_contains(ring, xy):
     return MplPath(ring).contains_points(xy).astype(int)
 
 
+BOUNDARY_TYPES = "Boundary (*.shp *.kml *.kmz *.geojson *.json *.zip)"
+
+
 def load_boundary(path, crs: str | None = None, near=None) -> Boundary:
-    """Read polygon(s) from a shapefile (.shp with .prj).
+    """Read study-area polygon(s): shapefile (.shp + .prj, or zipped), KML, KMZ or GeoJSON.
 
     ``crs``: EPSG code / CRS string of the borehole coordinates. ``near``:
-    (xmin, xmax, ymin, ymax) of the boreholes, used to auto-pick the UTM zone
-    when ``crs`` is not given.
+    (xmin, xmax, ymin, ymax) of the boreholes, used to pick the UTM zone
+    when ``crs`` is not given (KML/KMZ/GeoJSON are latitude/longitude).
     """
-    import shapefile  # pyshp
-
     path = Path(path)
-    reader = shapefile.Reader(str(path))
-    rings = []
-    for shp in reader.shapes():
-        if shp.shapeType not in (shapefile.POLYGON, shapefile.POLYGONZ, shapefile.POLYGONM):
-            continue
-        pts = np.asarray(shp.points, float)[:, :2]
-        parts = list(shp.parts) + [len(pts)]
-        for a, b in zip(parts[:-1], parts[1:]):
-            if b - a >= 3:
-                rings.append(pts[a:b])
+    ext = path.suffix.lower()
+    if ext == ".shp":
+        rings, src = _read_shp(path)
+    elif ext == ".zip":
+        rings, src = _read_zip(path)
+    elif ext in (".kml", ".kmz"):
+        rings, src = _read_kml(path)
+    elif ext in (".geojson", ".json"):
+        rings, src = _read_geojson(path)
+    else:
+        raise ValueError(f"{path.name}: boundary must be .shp, zipped shapefile, .kml, .kmz or .geojson")
+    rings = [r for r in rings if len(r) >= 3]
     if not rings:
-        raise ValueError(f"{path.name}: no polygons found (the boundary must be a polygon shapefile)")
+        raise ValueError(f"{path.name}: no polygons found (the boundary must be a polygon)")
     b = Boundary(rings, name=path.stem)
-
-    prj = path.with_suffix(".prj")
-    src = None
-    if prj.exists():
-        try:
-            from pyproj import CRS
-
-            src = CRS.from_wkt(prj.read_text())
-        except Exception:  # noqa: BLE001 - pyproj missing or unreadable .prj
-            src = None
     b.source_crs = src
     if crs:
         _reproject(b, src, crs)
@@ -141,6 +134,140 @@ def load_boundary(path, crs: str | None = None, near=None) -> Boundary:
                 "coordinate system with --crs, e.g. --crs EPSG:32643 for WGS 84 / UTM zone 43N.")
         b.crs_note = f"boundary was in {_crs_name(src)}; reprojected to {zone} to match the boreholes"
     return b
+
+
+def _read_shp(path: Path):
+    import shapefile  # pyshp
+
+    reader = shapefile.Reader(str(path))
+    rings = []
+    for shp in reader.shapes():
+        if shp.shapeType not in (shapefile.POLYGON, shapefile.POLYGONZ, shapefile.POLYGONM):
+            continue
+        pts = np.asarray(shp.points, float)[:, :2]
+        parts = list(shp.parts) + [len(pts)]
+        for a, b in zip(parts[:-1], parts[1:]):
+            if b - a >= 3:
+                rings.append(pts[a:b])
+    src = None
+    prj = path.with_suffix(".prj")
+    if prj.exists():
+        try:
+            from pyproj import CRS
+
+            src = CRS.from_wkt(prj.read_text())
+        except Exception:  # noqa: BLE001 - pyproj missing or unreadable .prj
+            src = None
+    return rings, src
+
+
+def _read_zip(path: Path):
+    import tempfile
+    import zipfile
+
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        tmp = Path(tempfile.mkdtemp(prefix="litholog_bnd_"))
+        z.extractall(tmp)
+    for kind in (".shp", ".kml", ".geojson", ".json"):
+        hit = [n for n in names if n.lower().endswith(kind) and not n.startswith("__MACOSX")]
+        if hit:
+            b = load_boundary(tmp / hit[0])
+            return b.rings, b.source_crs
+    raise ValueError(f"{path.name}: no .shp, .kml or .geojson inside the zip")
+
+
+def _wgs84():
+    try:
+        from pyproj import CRS
+
+        return CRS.from_epsg(4326)
+    except ImportError:
+        return None
+
+
+def _parse_coords(text: str) -> np.ndarray:
+    pts = []
+    for tok in text.split():
+        v = tok.split(",")
+        if len(v) >= 2:
+            pts.append((float(v[0]), float(v[1])))
+    a = np.asarray(pts, float)
+    if len(a) > 3 and np.allclose(a[0], a[-1]):
+        a = a[:-1]
+    return a
+
+
+def _read_kml(path: Path):
+    """Polygons (outer and inner rings) from KML / KMZ (Google Earth); always WGS 84 lon/lat."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    if path.suffix.lower() == ".kmz":
+        with zipfile.ZipFile(path) as z:
+            kml = next((n for n in z.namelist() if n.lower().endswith(".kml")), None)
+            if kml is None:
+                raise ValueError(f"{path.name}: no .kml inside the KMZ")
+            data = z.read(kml)
+    else:
+        data = path.read_bytes()
+    root = ET.fromstring(data)
+    rings = []
+    for el in root.iter():
+        tag = el.tag.rsplit("}", 1)[-1]
+        if tag in ("outerBoundaryIs", "innerBoundaryIs"):
+            for c in el.iter():
+                if c.tag.rsplit("}", 1)[-1] == "coordinates" and c.text:
+                    rings.append(_parse_coords(c.text))
+    if not rings:  # a closed LineString drawn as the boundary
+        for el in root.iter():
+            if el.tag.rsplit("}", 1)[-1] == "LineString":
+                for c in el.iter():
+                    if c.tag.rsplit("}", 1)[-1] == "coordinates" and c.text:
+                        r = _parse_coords(c.text)
+                        if len(r) >= 3:
+                            rings.append(r)
+    return rings, _wgs84()
+
+
+def _read_geojson(path: Path):
+    import json
+
+    gj = json.loads(path.read_text())
+    src = _wgs84()
+    name = (gj.get("crs") or {}).get("properties", {}).get("name")
+    if name:
+        try:
+            from pyproj import CRS
+
+            src = CRS.from_user_input(name)
+        except Exception:  # noqa: BLE001
+            pass
+    rings = []
+
+    def geom(g):
+        if not g:
+            return
+        t = g.get("type")
+        if t == "Polygon":
+            rings.extend(np.asarray(r, float)[:, :2] for r in g["coordinates"])
+        elif t == "MultiPolygon":
+            for poly in g["coordinates"]:
+                rings.extend(np.asarray(r, float)[:, :2] for r in poly)
+        elif t == "GeometryCollection":
+            for gg in g.get("geometries", []):
+                geom(gg)
+
+    t = gj.get("type")
+    if t == "FeatureCollection":
+        for f in gj.get("features", []):
+            geom(f.get("geometry"))
+    elif t == "Feature":
+        geom(gj.get("geometry"))
+    else:
+        geom(gj)
+    rings = [r[:-1] if len(r) > 3 and np.allclose(r[0], r[-1]) else r for r in rings]
+    return rings, src
 
 
 def _crs_name(src):
@@ -172,13 +299,20 @@ def _auto_utm(b: Boundary, src, near):
         from pyproj import CRS
     except ImportError:
         return None
-    if src is None or not src.utm_zone:
+    if src is None:
         return None
-    zone, hemi = int(src.utm_zone[:-1]), src.utm_zone[-1]
+    if src.is_geographic:  # lat/lon (KML, GeoJSON): the UTM zone of the boundary centre and neighbours
+        x0, x1, y0, y1 = b.bbox
+        lon, lat = (x0 + x1) / 2, (y0 + y1) / 2
+        zone, hemi, steps = int((lon + 180) // 6) + 1, "N" if lat >= 0 else "S", (0, -1, 1, -2, 2)
+    elif src.utm_zone:
+        zone, hemi, steps = int(src.utm_zone[:-1]), src.utm_zone[-1], (-1, 1, -2, 2)
+    else:
+        return None
     base = 32600 if hemi == "N" else 32700  # WGS 84 / UTM zones
     best = None
     orig = [r.copy() for r in b.rings]
-    for dz in (-1, 1, -2, 2):
+    for dz in steps:
         z = zone + dz
         if not 1 <= z <= 60:
             continue
