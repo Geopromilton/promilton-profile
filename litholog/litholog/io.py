@@ -152,9 +152,126 @@ def canonical_element(v) -> str:
     return n or "casing"
 
 
-def load_project(path, name: str | None = None) -> Project:
-    """Load an Excel workbook (.xlsx/.xls) or a folder of CSV files."""
+GMS_SUFFIXES = (".txt", ".dat", ".tsv", ".bor")
+
+
+def load_project(path, name: str | None = None, legend=None) -> Project:
+    """Load an Excel workbook, a folder of CSV files, or a GMS borehole text file.
+
+    ``legend`` (a file path or Legend) overrides/extends the lithology codes.
+    """
     path = Path(path)
+    if path.is_file() and (path.suffix.lower() in GMS_SUFFIXES or _looks_like_gms(path)):
+        project = load_gms(path, name=name)
+    else:
+        project = _load_tables(path, name)
+    if legend is not None:
+        project.legend = legend if isinstance(legend, Legend) else load_legend(legend, project.legend)
+    return project
+
+
+def load_legend(path, base: Legend | None = None) -> Legend:
+    """Read a legend table (CSV or Excel): Code, Name, Color, Pattern[, Group]."""
+    path = Path(path)
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        sheets = pd.read_excel(path, sheet_name=None)
+        df = next((d for n, d in sheets.items() if _match_table(n) == "legend"), next(iter(sheets.values())))
+    else:
+        df = pd.read_csv(path, sep=None, engine="python")
+    df = df.dropna(how="all").copy()
+    df.columns = [normalize(c) for c in df.columns]
+    df = df.rename(columns={"colour": "color", "fill": "color", "lithology": "name",
+                            "material": "code", "material_id": "code", "id": "code"})
+    df["code"] = df["code"].map(_clean_id)
+    return (base or Legend()).updated(df.to_dict("records"))
+
+
+def _looks_like_gms(path: Path) -> bool:
+    if path.suffix.lower() != ".csv":
+        return False
+    head = {normalize(c) for c in pd.read_csv(path, sep=None, engine="python", nrows=0).columns}
+    return {"x", "y", "z"} <= head and bool(head & {"material", "mat", "material_id", "matid"})
+
+
+def load_gms(path, name: str | None = None) -> Project:
+    """Read a GMS borehole file (columns Name, X, Y, Z, Material).
+
+    Each row is the top elevation of a contact and the material below it; the
+    last row of a hole marks its bottom. Depths are converted to m below the
+    first (collar) elevation, and material IDs become lithology codes.
+    """
+    path = Path(path)
+    df = pd.read_csv(path, sep=None, engine="python")
+    df.columns = [normalize(c) for c in df.columns]
+    alias = {"hole_id": "name", "hid": "name", "borehole": "name", "borehole_id": "name", "id": "name",
+             "elev": "z", "elevation": "z", "mat": "material", "material_id": "material",
+             "matid": "material"}
+    df = df.rename(columns={c: alias.get(c, c) for c in df.columns})
+    missing = {"name", "x", "y", "z", "material"} - set(df.columns)
+    if missing:
+        raise ValueError(f"{path.name}: GMS borehole file needs columns Name, X, Y, Z, Material "
+                         f"(missing: {', '.join(sorted(missing))})")
+    df = df.dropna(subset=["name", "z"])
+    df["name"] = df["name"].map(_clean_id)
+    for c in ("x", "y", "z"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    collars, liths = [], []
+    for bid, g in df.groupby("name", sort=False):
+        g = g.sort_values("z", ascending=False, kind="stable")
+        top = g["z"].iloc[0]
+        zs, mats = list(g["z"]), [_clean_id(m) if pd.notna(m) else "" for m in g["material"]]
+        collars.append({"borehole_id": bid, "x": g["x"].iloc[0], "y": g["y"].iloc[0],
+                        "elevation": top, "total_depth": round(top - zs[-1], 3)})
+        for i in range(len(zs) - 1):
+            f, t = round(top - zs[i], 3), round(top - zs[i + 1], 3)
+            if t <= f:
+                continue
+            if liths and liths[-1]["borehole_id"] == bid and liths[-1]["code"] == mats[i] \
+                    and abs(liths[-1]["to"] - f) < 1e-9:
+                liths[-1]["to"] = t  # merge repeated material rows
+            else:
+                liths.append({"borehole_id": bid, "from": f, "to": t, "code": mats[i], "description": ""})
+
+    tables = {t: empty_table(t) for t in TABLE_COLUMNS}
+    tables["boreholes"] = pd.DataFrame(collars, columns=TABLE_COLUMNS["boreholes"])
+    tables["lithology"] = pd.DataFrame(liths, columns=TABLE_COLUMNS["lithology"])
+    return Project(**tables, name=name or path.stem)
+
+
+def write_project(project: Project, path) -> Path:
+    """Save a project as a LithoLog workbook (e.g. after importing GMS data)."""
+    path = Path(path)
+    heads = {
+        "boreholes": {"borehole_id": "Borehole ID", "x": "X", "y": "Y", "elevation": "Elevation (m amsl)",
+                      "total_depth": "Total depth (m)"},
+        "lithology": {"borehole_id": "Borehole ID", "from": "From (m)", "to": "To (m)", "code": "Code",
+                      "description": "Description"},
+        "construction": {"borehole_id": "Borehole ID", "from": "From (m)", "to": "To (m)",
+                         "element": "Element", "diameter": "Diameter (mm)", "material": "Material"},
+        "water_levels": {"borehole_id": "Borehole ID", "date": "Date", "depth": "Depth to water (m bgl)"},
+        "downhole": {"borehole_id": "Borehole ID", "depth": "Depth (m)", "parameter": "Parameter",
+                     "value": "Value", "unit": "Unit"},
+    }
+    sheet = {"boreholes": "Boreholes", "lithology": "Lithology", "construction": "Construction",
+             "water_levels": "WaterLevels", "downhole": "Downhole"}
+    used = set(project.lithology["code"])
+    legend = pd.DataFrame([{"Code": t.code, "Name": t.name, "Color": t.color, "Pattern": t.pattern,
+                            "Group": t.group} for t in project.legend if t.code in used]
+                          + [{"Code": t.code, "Name": t.name, "Color": t.color, "Pattern": t.pattern,
+                              "Group": t.group} for t in project.legend if t.code not in used])
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        pd.DataFrame(_INSTRUCTIONS, columns=["Topic", "Notes"]).to_excel(xw, sheet_name="Instructions", index=False)
+        for table, cols in heads.items():
+            df = getattr(project, table)
+            extra = [c for c in df.columns if c not in cols]
+            df[list(cols) + extra].rename(columns=cols).to_excel(xw, sheet_name=sheet[table], index=False)
+        legend.to_excel(xw, sheet_name="Legend", index=False)
+        _style_workbook(xw.book)
+    return path
+
+
+def _load_tables(path: Path, name: str | None) -> Project:
     raw: dict[str, pd.DataFrame] = {}
     if path.is_dir():
         for f in sorted(path.glob("*.csv")):

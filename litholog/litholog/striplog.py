@@ -138,9 +138,12 @@ def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
     if bh.has_elevation:
         widths.append(("elev", s.elev_w))
     widths.append(("lith", s.lith_w))
-    fixed = sum(w for _, w in widths) + s.well_w + len(params) * s.curve_w
+    show_well = len(bh.construction) > 0 or len(bh.water_levels.dropna(subset=["depth"])) > 0
+    well_w = s.well_w if show_well else 0.0
+    fixed = sum(w for _, w in widths) + well_w + len(params) * s.curve_w
     widths.append(("desc", usable - fixed))
-    widths.append(("well", s.well_w))
+    if show_well:
+        widths.append(("well", well_w))
     widths += [(f"curve:{p}", s.curve_w) for p in params]
 
     y_title = s.margin + s.header_h + 2
@@ -174,7 +177,8 @@ def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
     _lith_track(axes["lith"], bh, legend, top, bottom)
     desc_w = dict(widths)["desc"]
     _desc_track(pg, axes["desc"], bh, legend, top, bottom, s, desc_w, y_body, body_h)
-    _well_track(axes["well"], bh, top, bottom)
+    if "well" in axes:
+        _well_track(axes["well"], bh, top, bottom)
     for i, p in enumerate(params):
         _curve_track(axes[f"curve:{p}"], bh, p, CURVE_COLORS[i % len(CURVE_COLORS)])
 
@@ -317,11 +321,19 @@ def _desc_track(pg, ax, bh, legend, top, bottom, s: Style, width_mm, y_body, bod
         for j, line in enumerate(lines):
             y = t + (j + 0.5) * line_h
             if j == 0 and line.startswith(head):
-                mm.text(5, y, head, fontsize=s.desc_size, va="center", color=ACCENT, fontweight="bold")
-                off = (len(head) + 2) * s.desc_size * PT_MM * 0.55
+                h_txt = mm.text(5, y, head, fontsize=s.desc_size, va="center", color=ACCENT,
+                                fontweight="bold")
+                off = _text_width_mm(h_txt, mm) + s.desc_size * PT_MM * 0.8
                 mm.text(5 + off, y, line[len(head):].strip(), fontsize=s.desc_size, va="center", color=INK)
             else:
                 mm.text(5, y, line, fontsize=s.desc_size, va="center", color=INK)
+
+
+def _text_width_mm(text, ax) -> float:
+    """Rendered width of a text artist in the axes' x units (mm here)."""
+    renderer = ax.figure.canvas.get_renderer()
+    bb = text.get_window_extent(renderer).transformed(ax.transData.inverted())
+    return abs(bb.x1 - bb.x0)
 
 
 def _well_track(ax, bh, top, bottom):

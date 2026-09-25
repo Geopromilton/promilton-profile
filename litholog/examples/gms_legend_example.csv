@@ -1,0 +1,6 @@
+Code,Name,Color,Pattern,Group
+1,Top soil,#C9AE85,roots+fine_dots,Soil & cover
+2,Weathered GBG,#E8C9A6,waves+diag,Weathering profile
+3,GBG,#D9CFEA,waves,Crystalline
+4,Fractured layer with water,#9FCBEA,waves+fractures,Aquifer
+5,Khondalite,#C7A49B,schist+fine_dots,Crystalline

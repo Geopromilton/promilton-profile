@@ -36,13 +36,30 @@ litholog striplog examples/sample_project.xlsx --title "Demo project"
 Headers are matched loosely: `BH ID`, `Well`, `Borehole` all work; units in brackets are ignored;
 dates can be `2025-03-13` or `13-03-2025`. A folder of CSV files with the same names also works.
 
+## Importing GMS borehole files
+
+LithoLog reads GMS borehole text files (`Name  X  Y  Z  Material`, tab/space/comma separated)
+directly. Each row is the top elevation of a contact and the material below it; the last row of a
+hole marks its bottom. Elevations become depths below the collar, and material IDs become
+lithology codes; give them names, colours and patterns in a small legend file
+(see `examples/gms_legend_example.csv`):
+
+```bash
+litholog striplog boreholes_gms.txt --legend my_legend.csv      # logs straight from GMS data
+litholog convert  boreholes_gms.txt my_site.xlsx --legend my_legend.csv
+# → editable workbook: add descriptions, well construction, water levels, then re-run striplog
+```
+
 ## Commands
 
 ```
 litholog template FILE.xlsx [--empty]        write the input workbook (with example rows)
 litholog validate DATA                       check for overlaps, gaps, bad depths, unknown codes
 litholog striplog DATA [-o DIR] [-f pdf|png|svg] [-b BH1 BH2] [-m 50] [--title NAME]
+litholog convert DATA [OUT.xlsx] [-l LEGEND] turn GMS text / CSV folder into a workbook
 litholog legend [DATA] [-o legend.pdf]       list / draw the lithology legend
+
+Add `-l my_legend.csv` to validate / striplog / convert to use your own codes.
 ```
 
 `-m 50` splits long holes into pages of 50 m each; by default each hole fits on one A4 page.
@@ -71,7 +88,7 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 
 ## Roadmap
 
-- [x] **M1** Borehole database (Excel/CSV), validation, strip logs, custom legends
+- [x] **M1** Borehole database (Excel/CSV/GMS), validation, strip logs, custom legends
 - [ ] **M2** Cross-sections along any line, 2D/3D fence diagrams
 - [ ] **M3** Layer-surface models, isopach and water-table maps, 3D lithology block models, volumes
 - [ ] **M4** Browser app (no install), 3D viewer, report export, KMZ/VTK/DXF export

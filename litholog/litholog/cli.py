@@ -20,9 +20,16 @@ def main(argv=None) -> int:
 
     v = sub.add_parser("validate", help="check a workbook / CSV folder for data errors")
     v.add_argument("data")
+    v.add_argument("-l", "--legend", help="legend file (CSV/Excel: Code, Name, Color, Pattern)")
+
+    c = sub.add_parser("convert", help="convert GMS borehole text (or any input) to a LithoLog workbook")
+    c.add_argument("data")
+    c.add_argument("out", nargs="?", help="output .xlsx (default: <input>.xlsx)")
+    c.add_argument("-l", "--legend", help="legend file for material IDs / codes")
 
     s = sub.add_parser("striplog", help="draw strip logs for every (or selected) borehole")
-    s.add_argument("data", help="Excel workbook or folder of CSV files")
+    s.add_argument("data", help="Excel workbook, folder of CSV files, or GMS borehole .txt")
+    s.add_argument("-l", "--legend", help="legend file (CSV/Excel: Code, Name, Color, Pattern)")
     s.add_argument("-o", "--out", default="striplogs", help="output folder (default: striplogs)")
     s.add_argument("-b", "--boreholes", nargs="+", help="only these borehole IDs")
     s.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
@@ -37,7 +44,7 @@ def main(argv=None) -> int:
 
     a = p.parse_args(argv)
     return {"template": _template, "validate": _validate, "striplog": _striplog,
-            "legend": _legend}[a.cmd](a)
+            "legend": _legend, "convert": _convert}[a.cmd](a)
 
 
 def _template(a):
@@ -62,7 +69,17 @@ def _report(project):
 def _validate(a):
     from .io import load_project
 
-    return 1 if _report(load_project(a.data)) else 0
+    return 1 if _report(load_project(a.data, legend=a.legend)) else 0
+
+
+def _convert(a):
+    from .io import load_project, write_project
+
+    project = load_project(a.data, legend=a.legend)
+    out = Path(a.out) if a.out else Path(a.data).with_suffix(".xlsx")
+    write_project(project, out)
+    print(f"Wrote {out}: {len(project.ids)} borehole(s), {len(project.lithology)} lithology interval(s)")
+    return 0
 
 
 def _striplog(a):
@@ -72,7 +89,7 @@ def _striplog(a):
     from .io import load_project
     from .striplog import Style, save_striplog, striplog_pages
 
-    project = load_project(a.data)
+    project = load_project(a.data, legend=a.legend)
     _report(project)
     style = Style(project_name=a.title or project.name)
     ids = a.boreholes or project.ids
