@@ -122,8 +122,21 @@ the boreholes, bounded by the ground surface, the base of drilling and the boreh
   are not under-counted; they agree with the isopach (thickness-map) volume.
 * `--sy CODE=value` adds groundwater storage = volume × specific yield (your estimate) per unit.
 
-Outputs: cut-away 3D view with a legend/volume table, views of selected units (`--only`),
-horizontal slices, `volumes.csv`, and `model.vtk` for ParaView.
+Outputs (default `--style smooth`):
+
+* `solid_3d.html` — interactive 3D model (rotate, zoom, hide units by clicking the legend); opens
+  in any browser, no installation needed.
+* Smooth solids like GMS: each lithology is a closed, lit surface (marching cubes on the smoothed
+  borehole vote), with the top following the real ground surface — not voxel steps.
+* Standard views as PNG and on one sheet (`solid_views.pdf`): oblique from SW / NE (with a cut-away
+  corner showing the interior), top (plan), front, back, left and right (orthographic).
+  Choose with `--views top front oblique_se ...`; `--cutaway ne|nw|se|none`.
+* `--only CODE` also draws that unit alone, sized to its reported volume.
+* Horizontal slices, `volumes.csv`, and `model.vtk` for ParaView. `--style blocks` gives the voxel
+  (block) rendering instead; `--style both` gives both.
+
+PNG export uses Chrome/Chromium through Kaleido; if none is found, the HTML is still written
+(run `plotly_get_chrome` once to install one).
 
 ![Block model](docs/model_demo.png)
 

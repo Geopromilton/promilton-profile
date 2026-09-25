@@ -99,6 +99,13 @@ def main(argv=None) -> int:
     md.add_argument("--ve", type=float, help="vertical exaggeration")
     md.add_argument("--azim", type=float, default=-60)
     md.add_argument("--elev", type=float, default=30)
+    md.add_argument("--style", default="smooth", choices=["smooth", "blocks", "both"],
+                    help="smooth solids (interactive HTML + standard views; default), voxel blocks, or both")
+    md.add_argument("--views", nargs="+", metavar="VIEW",
+                    help="views for smooth solids: oblique_sw oblique_se oblique_ne oblique_nw top front "
+                         "back left right (default: all main views)")
+    md.add_argument("--cutaway", default="sw", choices=["sw", "se", "ne", "nw", "none"],
+                    help="quadrant removed in oblique views of the smooth model (default sw)")
     md.add_argument("-o", "--out", default="model", help="output folder (default: model)")
     md.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
     md.add_argument("--title", help="project name")
@@ -326,10 +333,21 @@ def _model(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     kw = dict(title=a.title or project.name, sy=sy, ve=a.ve, azim=a.azim, elev=a.elev)
-    files = [model_view(model, project.legend, out / f"block_model.{a.format}", **kw)]
-    for code in a.only or []:
-        files.append(model_view(model, project.legend, out / f"block_model_{_safe(code)}.{a.format}",
-                                only=[code.upper()], **kw))
+    files = []
+    if a.style in ("smooth", "both"):
+        from .solid import export_solids
+
+        cut = None if a.cutaway == "none" else a.cutaway
+        files += export_solids(model, project.legend, out, views=a.views, cutaway=cut, ve=a.ve,
+                               title=kw["title"], sy=sy)
+        for code in a.only or []:
+            files += export_solids(model, project.legend, out, views=a.views or ["oblique_sw", "top"],
+                                   ve=a.ve, title=kw["title"], sy=sy, only=[code.upper()], sheet=False)
+    if a.style in ("blocks", "both"):
+        files.append(model_view(model, project.legend, out / f"block_model.{a.format}", **kw))
+        for code in a.only or []:
+            files.append(model_view(model, project.legend, out / f"block_model_{_safe(code)}.{a.format}",
+                                    only=[code.upper()], **kw))
     files.append(slices_figure(model, project.legend, out / f"slices.{a.format}", title=kw["title"]))
     vols = model.volumes(sy)
     vols.insert(1, "name", [project.legend.get(c).name for c in vols["code"]])

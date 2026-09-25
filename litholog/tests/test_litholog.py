@@ -348,3 +348,31 @@ def test_boundary_auto_utm_zone_and_clipping(tmp_path):
     assert abs(area - b.area) / b.area < 0.05
     v = m.volumes().set_index("code")
     assert abs(v.loc["4", "volume_m3"] / area - 10) < 1.0
+
+
+# --- Smooth solids ------------------------------------------------------------------
+
+def test_smooth_solids_and_views(tmp_path):
+    import numpy as np
+
+    from litholog.model3d import build_model
+    from litholog.solid import VIEWS, build_solids, export_solids, solid_figure
+
+    proj, _ = _grid_project(tmp_path)
+    m = build_model(proj, cell=100, dz=1.0)
+    solids = build_solids(m)
+    assert {s.code for s in solids} == {"1", "4", "3"}
+    for s in solids:
+        assert len(s.faces) > 0
+        assert m.x[0] - m.cell <= s.verts[:, 0].min() and s.verts[:, 0].max() <= m.x[-1] + m.cell
+        assert m.z[0] - m.dz <= s.verts[:, 2].min() and s.verts[:, 2].max() <= m.z[-1] + m.dz
+    only = build_solids(m, only=["4"])
+    assert [s.code for s in only] == ["4"]
+    cut = build_solids(m, cutaway="sw")
+    assert sum(len(s.faces) for s in cut) > 0
+    fig, ve = solid_figure(m, solids, proj.legend)
+    assert ve >= 1 and len(fig.data) >= 3
+    files = export_solids(m, proj.legend, tmp_path / "out", views=["oblique_sw", "front"])
+    assert (tmp_path / "out" / "solid_3d.html").stat().st_size > 100_000
+    assert set(VIEWS) >= {"top", "front", "back", "left", "right", "oblique_sw"}
+    assert files[0].name == "solid_3d.html"

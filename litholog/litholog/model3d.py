@@ -40,6 +40,11 @@ class BlockModel:
     expected: np.ndarray | None = None  # (ncodes,) probability-weighted voxel counts
     boundary: object = None             # study-area Boundary, if the model was clipped to one
     coverage: float | None = None       # share of the model area inside the boreholes' hull
+    prob: np.ndarray | None = None      # (nz, ny, nx, ncodes) vote proportions (for smooth solids)
+    ground: np.ndarray | None = None    # (ny, nx) ground-surface elevation
+    base: np.ndarray | None = None      # (ny, nx) base-of-drilling elevation
+    inside: np.ndarray | None = None    # (ny, nx) columns inside the model area
+    holes: list | None = None           # [(id, x, y, [Unit, ...]), ...] for drawing boreholes
 
     @property
     def voxel_volume(self):
@@ -153,6 +158,7 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
         probs[k] = (scores / scores.sum(1, keepdims=True)).reshape(X.shape + (len(codes),))
 
     lith = np.full((len(gz), len(gy), len(gx)), -1, int)
+    prob = np.zeros((len(gz), len(gy), len(gx), len(codes)), np.float32)
     expected = np.zeros(len(codes))
     for k, z in enumerate(gz):
         keep = inside & (z <= ground) & (z >= base)
@@ -162,10 +168,13 @@ def build_model(project: Project, cell: float | None = None, dz: float | None = 
             p = np.take_along_axis(probs, kd[None, :, :, None], 0)[0]
         else:
             layer, p = votes[k], probs[k]
+        prob[k] = p
         keep &= layer >= 0
         lith[k] = np.where(keep, layer, -1)
         expected += p[keep].sum(0)
-    return BlockModel(gx, gy, gz, cell, dz, lith, codes, expected, boundary, cov)
+    hole_info = [(bh.id, bh.x, bh.y, us) for bh, us in holes]
+    return BlockModel(gx, gy, gz, cell, dz, lith, codes, expected, boundary, cov,
+                      prob, ground, base, inside, hole_info)
 
 
 # ---------------------------------------------------------------------------
