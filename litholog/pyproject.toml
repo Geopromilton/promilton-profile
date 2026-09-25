@@ -18,10 +18,14 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+app = ["streamlit>=1.50"]
+dev = ["pytest", "streamlit>=1.50"]
 
 [project.scripts]
 litholog = "litholog.cli:main"
 
 [tool.setuptools]
 packages = ["litholog"]
+
+[tool.setuptools.package-data]
+litholog = ["data/*.xlsx"]

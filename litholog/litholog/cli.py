@@ -111,6 +111,10 @@ def main(argv=None) -> int:
     md.add_argument("--title", help="project name")
     md.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
 
+    ap = sub.add_parser("app", help="open the LithoLog browser app")
+    ap.add_argument("--port", type=int, default=8501)
+    ap.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+
     lg = sub.add_parser("legend", help="print the lithology codes, or draw them to a file")
     lg.add_argument("data", nargs="?", help="workbook with a custom Legend sheet (optional)")
     lg.add_argument("-o", "--out", help="save a legend chart (pdf/png/svg)")
@@ -118,7 +122,7 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     return {"template": _template, "validate": _validate, "striplog": _striplog,
             "legend": _legend, "convert": _convert, "section": _section, "fence": _fence,
-            "map": _map, "model": _model}[a.cmd](a)
+            "map": _map, "model": _model, "app": _app}[a.cmd](a)
 
 
 def _template(a):
@@ -383,6 +387,24 @@ def _boundary(a, project):
         if len(out):
             print(f"Note: {len(out)} borehole(s) lie outside the boundary: {', '.join(out['borehole_id'])}")
     return boundary
+
+
+def _app(a):
+    import subprocess
+
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        print("The app needs Streamlit:  pip install \"litholog[app]\"  (or pip install streamlit)",
+              file=sys.stderr)
+        return 2
+    script = Path(__file__).with_name("app.py")
+    cmd = [sys.executable, "-m", "streamlit", "run", str(script), "--server.port", str(a.port),
+           "--browser.gatherUsageStats", "false"]
+    if a.no_browser:
+        cmd += ["--server.headless", "true"]
+    print(f"LithoLog app: http://localhost:{a.port}  (Ctrl+C to stop)")
+    return subprocess.call(cmd)
 
 
 def _safe(name: str) -> str:

@@ -8,6 +8,19 @@ model with volumes and groundwater-storage estimates — as PDF, PNG or SVG.
 
 ![Example strip log](docs/BW-01.png)
 
+## The browser app (no command line needed)
+
+```bash
+pip install -e ".[app]"
+litholog app            # opens http://localhost:8501
+```
+
+Upload your Excel workbook or GMS borehole file (plus an optional legend and a zipped study-area
+shapefile), or try the demo data. Pages: **Overview** (location map, data check, legend) ·
+**Strip logs** · **Cross-section** · **Fence** · **Maps** · **3D model** (smooth solids you can
+rotate, standard views, volumes and storage with your specific yields) · **Help**. Every result can
+be downloaded (PDF, PNG, interactive HTML, ASCII grids, CSV, VTK).
+
 ## Quick start (3 commands)
 
 ```bash
@@ -202,7 +215,8 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 - [x] **M1** Borehole database (Excel/CSV/GMS), validation, strip logs, custom legends
 - [x] **M2** Cross-sections (hole-to-hole or along any line), 3D fence diagrams
 - [x] **M3** Contour maps (surfaces, isopachs, water table), 3D block model, volumes, storage
-- [ ] **M4** Browser app (no install), 3D viewer, report export, KMZ/VTK/DXF export
+- [x] **M4** Browser app, smooth 3D solids with standard views, interactive 3D viewer
+- [ ] Next: own repository, hosted app, KMZ/DXF export, saturated volume from water levels
 
 ## Development
 

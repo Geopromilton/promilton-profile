@@ -377,3 +377,22 @@ def test_smooth_solids_and_views(tmp_path):
     assert (tmp_path / "out" / "solid_3d.html").stat().st_size > 100_000
     assert set(VIEWS) >= {"top", "front", "back", "left", "right", "oblique_sw"}
     assert files[0].name == "solid_3d.html"
+
+
+# --- Browser app -------------------------------------------------------------------
+
+def test_app_pages_run_on_demo_data():
+    pytest.importorskip("streamlit")
+    from pathlib import Path
+
+    from streamlit.testing.v1 import AppTest
+
+    app = Path(__file__).parents[1] / "litholog" / "app.py"
+    at = AppTest.from_file(str(app), default_timeout=300)
+    at.run()
+    assert not at.exception
+    at.sidebar.radio[0].set_value("Demo data (synthetic)").run()
+    for page in ["Overview", "Strip logs", "Cross-section", "Fence", "Maps", "3D model", "Help"]:
+        at.radio(key="page").set_value(page).run()
+        assert not at.exception, (page, [e.message for e in at.exception])
+        assert not at.error, (page, [e.value for e in at.error])
