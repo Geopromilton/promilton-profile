@@ -32,11 +32,101 @@ class DEM:
 
 def load_dem(path) -> DEM:
     path = Path(path)
+    name = path.name.lower()
+    if name.endswith((".hgt", ".hgt.gz", ".hgt.zip")):
+        return _load_hgt(path)
     if path.suffix.lower() in (".asc", ".txt"):
         return _load_ascii(path)
     if path.suffix.lower() in (".tif", ".tiff"):
         return _load_geotiff(path)
-    raise ValueError(f"{path.name}: DEM must be a GeoTIFF (.tif) or ESRI ASCII grid (.asc)")
+    raise ValueError(f"{path.name}: DEM must be a GeoTIFF (.tif), SRTM tile (.hgt, .hgt.gz, .zip) or ESRI ASCII "
+                     "grid (.asc)")
+
+
+def _load_hgt(path: Path) -> DEM:
+    """SRTM .hgt tile (1 or 3 arc-second, big-endian int16, named after its SW corner, e.g. N08E077)."""
+    import gzip
+    import re
+    import zipfile
+
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        data = gzip.open(path).read()
+    elif name.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            data = z.read(next(n for n in z.namelist() if n.lower().endswith(".hgt")))
+    else:
+        data = path.read_bytes()
+    raw = np.frombuffer(data, ">i2")
+    n = int(round(np.sqrt(raw.size)))
+    if n * n != raw.size:
+        raise ValueError(f"{path.name}: not an SRTM .hgt tile")
+    m = re.search(r"([ns])(\d{2})([ew])(\d{3})", name)
+    if not m:
+        raise ValueError(f"{path.name}: SRTM tiles must keep their name (e.g. N08E077.hgt)")
+    lat = int(m.group(2)) * (1 if m.group(1) == "n" else -1)
+    lon = int(m.group(4)) * (1 if m.group(3) == "e" else -1)
+    z = raw.reshape(n, n).astype(float)
+    z[z <= -32768] = np.nan
+    from pyproj import CRS
+
+    step = 1.0 / (n - 1)
+    return DEM(z, float(lon), float(lat + 1), step, step, CRS.from_epsg(4326), path.name.split(".")[0])
+
+
+COPERNICUS = ("https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM/"
+              "Copernicus_DSM_COG_10_{ns}{lat:02d}_00_{ew}{lon:03d}_00_DEM.tif")
+
+
+def download_copernicus(lon0, lon1, lat0, lat1, folder, progress=None) -> Path:
+    """Download the Copernicus GLO-30 DEM (30 m, free; ESA / AWS open data) for a lon/lat box and save it as
+    one GeoTIFF clipped to the box. Returns the file path."""
+    import math
+    import urllib.request
+
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    tiles = []
+    for la in range(math.floor(lat0), math.floor(lat1) + 1):
+        for lo in range(math.floor(lon0), math.floor(lon1) + 1):
+            url = COPERNICUS.format(ns="N" if la >= 0 else "S", lat=abs(la), ew="E" if lo >= 0 else "W", lon=abs(lo))
+            dst = folder / url.rsplit("/", 1)[1]
+            if not dst.exists():
+                if progress:
+                    progress(f"Downloading {dst.name} …")
+                try:
+                    urllib.request.urlretrieve(url, dst)
+                except Exception as e:  # noqa: BLE001 - sea-only tiles do not exist
+                    if progress:
+                        progress(f"  tile {dst.name} not available ({e})")
+                    continue
+            tiles.append(load_dem(dst))
+    if not tiles:
+        raise RuntimeError("No DEM tiles could be downloaded (check the internet connection)")
+    step = tiles[0].dx
+    xs = np.arange(lon0, lon1 + step, step)
+    ys = np.arange(lat1, lat0 - step, -step)
+    X, Y = np.meshgrid(xs, ys)
+    z = np.full(X.shape, np.nan)
+    for t in tiles:
+        v = sample(t, X.ravel(), Y.ravel()).reshape(X.shape)
+        z = np.where(np.isfinite(v), v, z)
+    out = folder / f"copernicus_dem_{lat0:.2f}_{lon0:.2f}.tif"
+    write_geotiff(out, z, xs[0], ys[0], step, step, 4326)
+    return out
+
+
+def write_geotiff(path, z, x0, y0, dx, dy, epsg: int):
+    """Minimal GeoTIFF writer (float32, pixel centres x0/y0 of the first column/row, north up)."""
+    import tifffile
+
+    geokeys = (1, 1, 0, 4, 1024, 0, 1, 2 if epsg == 4326 else 1, 1025, 0, 1, 1,
+               2048 if epsg == 4326 else 3072, 0, 1, epsg, 4096, 0, 1, 5773)
+    tifffile.imwrite(path, np.where(np.isfinite(z), z, -9999).astype(np.float32), compression="zlib",
+                     extratags=[(33550, "d", 3, (dx, dy, 0.0)),
+                                (33922, "d", 6, (0, 0, 0, x0 - dx / 2, y0 + dy / 2, 0)),
+                                (34735, "H", len(geokeys), geokeys), (42113, "s", 0, "-9999")])
+    return path
 
 
 def _load_ascii(path: Path) -> DEM:
@@ -106,6 +196,8 @@ def sample(dem: DEM, xs, ys, crs=None) -> np.ndarray:
     """Bilinear DEM values at points (in ``crs``; default: the DEM's own system)."""
     xs = np.asarray(xs, float)
     ys = np.asarray(ys, float)
+    if crs is None and dem.crs is not None and dem.crs.is_geographic and np.nanmax(np.abs(xs), initial=0) > 360:
+        crs = MODEL_CRS["crs"] or _utm_of(dem)   # projected points on a lat/lon DEM: UTM zone of the DEM
     if dem.crs is not None and crs is not None:
         from pyproj import CRS, Transformer
 
@@ -123,6 +215,14 @@ def sample(dem: DEM, xs, ys, crs=None) -> np.ndarray:
     out[ok] = (z[r0, c0] * (1 - fc) * (1 - fr) + z[r0, c0 + 1] * fc * (1 - fr)
                + z[r0 + 1, c0] * (1 - fc) * fr + z[r0 + 1, c0 + 1] * fc * fr)
     return out
+
+
+def _utm_of(dem: DEM) -> str:
+    from .aquifer import utm_epsg
+
+    lon = dem.x0 + dem.z.shape[1] * dem.dx / 2
+    lat = dem.y0 - dem.z.shape[0] * dem.dy / 2
+    return f"EPSG:{utm_epsg(lon, lat)}"
 
 
 # The coordinate system of the model grid (set by the caller when it is known).

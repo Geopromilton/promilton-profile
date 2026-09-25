@@ -211,8 +211,14 @@ class WaterTable:
     reading: str
 
 
-def water_table(model, wells: Wells, reading=None, method: str = "idw") -> WaterTable:
-    """Water-table surface on the block model's grid (never above ground)."""
+def water_table(model, wells: Wells, reading=None, method="idw", surface: str = "depth") -> WaterTable:
+    """Water-table surface on the block model's grid (never above ground).
+
+    surface="depth": depth to water is interpolated and hung below the ground surface, so the water
+    table follows the topography (suits gentle terrain and shallow weathered aquifers).
+    surface="elevation": the water-table elevation at the wells is contoured (the usual practice for
+    water-table maps); it is capped at the ground, so hills without wells do not lift it.
+    """
     w = wells.values(reading)
     g_at = _sample(model.x, model.y, model.ground, w["x"].to_numpy(), w["y"].to_numpy())
     w["ground"] = w["ground"].fillna(pd.Series(g_at, index=w.index))
@@ -220,8 +226,12 @@ def water_table(model, wells: Wells, reading=None, method: str = "idw") -> Water
     w = w.dropna(subset=["wt"])
     if len(w) < 2:
         raise ValueError("Fewer than two wells have a usable water level")
-    dtw = interpolate(w["x"], w["y"], w["dtw"], model.x, model.y, method)
-    wt = model.ground - np.maximum(dtw, 0)  # depth-to-water follows the ground surface
+    if surface == "elevation":
+        wt = np.minimum(interpolate(w["x"], w["y"], w["wt"], model.x, model.y, method), model.ground)
+        dtw = model.ground - wt
+    else:
+        dtw = interpolate(w["x"], w["y"], w["dtw"], model.x, model.y, method)
+        wt = model.ground - np.maximum(dtw, 0)  # depth-to-water follows the ground surface
     mask = model.inside
     wt = np.where(mask, wt, np.nan)
     return WaterTable(Grid(model.x, model.y, wt, model.cell, mask, model.boundary, model.coverage),

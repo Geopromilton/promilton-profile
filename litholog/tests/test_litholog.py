@@ -737,3 +737,34 @@ def test_wells_degrees_in_xy_swapped_and_duplicates(tmp_path):
     assert list(w.table["well_id"]) == ["A (1)", "B", "A (2)"]     # village names, duplicates kept apart
     assert 780000 < w.table["x"].iloc[0] < 810000 and 930000 < w.table["y"].iloc[0] < 950000
     assert "swapped" in w.note and w.table["ground"].iloc[0] == 105
+
+
+def test_srtm_hgt_and_recharge(tmp_path):
+    import gzip
+
+    from litholog.aquifer import Wells
+    from litholog.dem import load_dem, sample
+    from litholog.horizons import build_horizon_model
+    from litholog.recharge import wtf_recharge
+
+    n = 121
+    z = (np.arange(n)[:, None] + np.zeros(n)[None, :]).astype(">i2")      # value = row number
+    (tmp_path / "N08E077.hgt.gz").write_bytes(gzip.compress(z.tobytes()))
+    d = load_dem(tmp_path / "N08E077.hgt.gz")
+    assert d.bounds[0] < 77.0 < d.bounds[1] and np.isclose(sample(d, [77.5], [9.0])[0], 0)
+    assert np.isclose(sample(d, [77.5], [8.5])[0], 60)                     # middle row
+
+    proj = _fractured_project(tmp_path)
+    m = build_horizon_model(proj, cell=100)
+    b = proj.boreholes
+    t = pd.DataFrame({"well_id": b["borehole_id"], "x": b["x"], "y": b["y"], "ground": b["elevation"],
+                      "pre": 12.0, "post": 4.0})
+    rr = wtf_recharge(m, Wells(t, ["pre", "post"]), "pre", "post", {"2": 0.02, "3": 0.01},
+                      draft_mcm=1.0, rainfall_mm=800, rif=0.1)
+    assert abs(rr.mean_rise_m - 8) < 1e-6
+    # rise of 8 m from 12 m to 4 m depth: 6 m in unit 2 (3-10 m) and 2 m in unit 3 (10-12 m)
+    area = rr.area_km2 * 1e6
+    expect = (6 * 0.02 + 2 * 0.01) * area / 1e6
+    assert abs(rr.storage_change_mcm - expect) / expect < 0.05
+    assert abs(rr.recharge_mcm - (rr.storage_change_mcm + 1.0)) < 1e-9
+    assert rr.recharge_pct_of_rain is not None and rr.rif_recharge_mcm == pytest.approx(0.1 * 0.8 * rr.area_km2)

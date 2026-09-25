@@ -135,6 +135,17 @@ def main(argv=None) -> int:
     aq.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
     aq.add_argument("-o", "--out", default="aquifer")
     aq.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
+    aq.add_argument("--rectify", action="store_true",
+                    help="with --dem: replace borehole collar and well elevations by the DEM")
+    aq.add_argument("--surface", default="depth", choices=["depth", "elevation"],
+                    help="depth: water table follows the ground (default); elevation: contour water-table "
+                         "elevations from the wells, capped at ground")
+    rg = aq.add_argument_group("recharge (water-table fluctuation, GEC-2015) between the first and last reading")
+    rg.add_argument("--rainfall", type=float, help="rainfall of the season (mm)")
+    rg.add_argument("--draft", type=float, default=0.0, help="gross groundwater draft during the season (MCM)")
+    rg.add_argument("--other-recharge", type=float, default=0.0,
+                    help="recharge from other sources during the season: canals, tanks, return flow (MCM)")
+    rg.add_argument("--rif", type=float, help="rainfall infiltration factor for comparison, e.g. 0.07")
     aq.add_argument("--title")
     aq.add_argument("-l", "--legend")
 
@@ -569,6 +580,18 @@ def _aquifer(a):
         return 2
     if wells.note:
         print(f"Wells: {wells.note}")
+    if getattr(a, "dem", None):
+        from .dem import load_dem, sample
+
+        dem = load_dem(a.dem)
+        t = wells.table
+        z = sample(dem, t["x"], t["y"], a.crs)
+        d = (t["ground"] - z).dropna()
+        if len(d):
+            print(f"Wells: elevation − DEM mean {d.mean():+.1f} m (± {d.std():.1f})"
+                  + (" → replaced by the DEM" if a.rectify else ""))
+        if a.rectify:
+            wells.table["ground"] = np.where(np.isfinite(z), z, t["ground"])
     model = _build(a, project, boundary)
     sy = _sy(a.sy)
     out = Path(a.out)
@@ -577,7 +600,7 @@ def _aquifer(a):
     readings = a.reading or wells.readings
     tables = {}
     for r in readings:
-        wt = water_table(model, wells, r, a.method)
+        wt = water_table(model, wells, r, a.method, a.surface)
         vals = wt.wells.rename(columns={"well_id": "borehole_id"})
         tag = _safe(str(r))
         save_map(wt.grid, vals.assign(value=vals["wt"]), "water", out / f"water_table_{tag}.{a.format}",
@@ -597,8 +620,8 @@ def _aquifer(a):
         print(v[cols].round(1).to_string(index=False))
     if len(readings) >= 2:
         r0, r1 = readings[0], readings[-1]
-        w0 = water_table(model, wells, r0, a.method)
-        w1 = water_table(model, wells, r1, a.method)
+        w0 = water_table(model, wells, r0, a.method, a.surface)
+        w1 = water_table(model, wells, r1, a.method, a.surface)
         from dataclasses import replace
 
         rise = replace(w1.grid, z=w1.grid.z - w0.grid.z)
@@ -612,6 +635,20 @@ def _aquifer(a):
         mean_rise = float(np.nanmean(np.where(rise.valid, rise.z, np.nan)))
         print(f"\nWater-level change {r0} → {r1}: mean {mean_rise:+.2f} m over {area / 1e6:,.1f} km² "
               f"(wells: {np.nanmean(v0 - v1.reindex(v0.index)):+.2f} m)")
+    if len(readings) >= 2 and sy:
+        from .recharge import wtf_recharge
+
+        rr = wtf_recharge(model, wells, readings[0], readings[-1], sy, a.draft, a.other_recharge, a.rainfall,
+                          a.rif, a.method, a.surface)
+        rr.table.insert(1, "name", [project.legend.get(c).name for c in rr.table["code"]])
+        rr.table.round(3).to_csv(out / "recharge_wtf.csv", index=False)
+        print(f"\nRecharge, water-table fluctuation method ({readings[0]} → {readings[-1]}):")
+        for line in rr.summary():
+            print("  " + line)
+        missing = rr.table[rr.table["specific_yield"].isna() & (rr.table["volume_between_mcm"] > 1)]
+        if len(missing):
+            print("  Note: no specific yield given for " + ", ".join(missing["name"])
+                  + " – their share of the fluctuation zone is counted as zero")
     if len(readings) >= 2 and sy:
         r0, r1 = readings[0], readings[-1]
         d = tables[r1][["code", "name"]].copy()

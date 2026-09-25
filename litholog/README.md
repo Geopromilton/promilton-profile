@@ -222,6 +222,29 @@ terrain between boreholes. The collar elevations are compared with the DEM and t
 reported; `--rectify` replaces them by the DEM values. In LithoLog Studio the terrain around the
 model can also be shown in 3D (View ▸ Terrain).
 
+## Water levels, fluctuation and recharge
+
+```bash
+litholog aquifer data.xlsx -w water_levels.csv --boundary area.kmz --dem dem.tif --rectify \
+    --sy 2=0.015 4=0.01 --rainfall 850 --draft 12.5 --other-recharge 3 --rif 0.07
+```
+
+* Wells: CSV/Excel with one column per reading (e.g. pre- and post-monsoon) or one row per reading;
+  X/Y in metres or in degrees (latitude/longitude in either order are recognised), village names as
+  IDs, duplicate names kept apart.
+* Maps of water-table elevation (with flow arrows), depth to water, and the water-level rise
+  (fluctuation) between the first and last reading; saturated volume and storage of every unit.
+* `--dem` with `--rectify` replaces borehole and well elevations by the DEM (differences reported).
+* Recharge by the water-table fluctuation method (GEC-2015): storage change ΔS = volume of each unit
+  between the two water tables × its specific yield; recharge = ΔS + draft − other sources; with
+  `--rainfall`, recharge as % of rainfall, and `--rif` for the rainfall-infiltration-factor method.
+  Specific yield, draft, other sources and RIF are your inputs.
+* `--surface elevation` contours water-table elevations instead of hanging the depth to water below
+  the ground (the default).
+
+DEMs: GeoTIFF, SRTM `.hgt` / `.hgt.gz`, ESRI `.asc`. In Studio, Home ▸ DEM can also download the free
+Copernicus GLO-30 DEM (30 m) for the project area.
+
 ## LithoLog Studio (Windows desktop app)
 
 A ribbon interface with project tree, properties and message panels; everything runs locally.

@@ -131,6 +131,7 @@ class MainWindow(QMainWindow):
         an = r.page("Analysis")
         r.group(an, "Groundwater", [
             ("aquifer", "mdi6.water-outline", "Aquifer &\nstorage", self.aquifer, False),
+            ("recharge", "mdi6.weather-pouring", "Recharge\n(WTF)", self.recharge, False),
         ])
         r.group(an, "3D properties", [
             ("prop", "mdi6.chart-bubble", "Property\nmodel", self.property_model, False),
@@ -1048,10 +1049,83 @@ class MainWindow(QMainWindow):
     def open_dem(self):
         if not self.need_project():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Open DEM", "",
-                                              "DEM (*.tif *.tiff *.asc);;GeoTIFF (*.tif *.tiff);;ESRI ASCII (*.asc)")
+        m = QMessageBox(self)
+        m.setWindowTitle("DEM")
+        m.setText("Open a DEM file (GeoTIFF, SRTM .hgt, ESRI .asc), or download the free Copernicus GLO-30 DEM "
+                  "(30 m, ESA) for this project's area from the internet.")
+        b_file = m.addButton("Open file…", QMessageBox.AcceptRole)
+        b_dl = m.addButton("Download (Copernicus 30 m)", QMessageBox.ActionRole)
+        m.addButton(QMessageBox.Cancel)
+        m.exec()
+        if m.clickedButton() is b_dl:
+            self.download_dem()
+            return
+        if m.clickedButton() is not b_file:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open DEM", "", "DEM (*.tif *.tiff *.hgt *.gz *.zip *.asc);;GeoTIFF (*.tif *.tiff);;"
+                                  "SRTM (*.hgt *.hgt.gz *.zip);;ESRI ASCII (*.asc)")
         if path:
             self._load_dem(path, rebuild=True)
+
+    def _project_crs(self):
+        """EPSG of the borehole coordinates: from the boundary's reprojection, else asked (UTM guess)."""
+        import re
+
+        from PySide6.QtWidgets import QInputDialog
+
+        from ..dem import MODEL_CRS
+
+        guess = MODEL_CRS["crs"]
+        if not guess and self.boundary is not None:
+            mm = re.search(r"(EPSG:\d+)\s*(?:to match|$)", self.boundary.crs_note or "")
+            guess = mm.group(1) if mm else None
+        text, ok = QInputDialog.getText(self, "Coordinate system", "Coordinate system of the borehole X/Y "
+                                        "(EPSG code, e.g. EPSG:32643 = UTM zone 43N):", text=guess or "EPSG:32643")
+        if not ok or not text.strip():
+            return None
+        MODEL_CRS["crs"] = text.strip().upper()
+        return MODEL_CRS["crs"]
+
+    def download_dem(self):
+        crs = self._project_crs()
+        if not crs:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Folder to keep the DEM in")
+        if not folder:
+            return
+        from pyproj import Transformer
+
+        from ..dem import download_copernicus
+
+        b = self.project.boreholes.dropna(subset=["x", "y"])
+        x0, x1, y0, y1 = b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()
+        if self.boundary is not None:
+            bx0, bx1, by0, by1 = self.boundary.bbox
+            x0, x1, y0, y1 = min(x0, bx0), max(x1, bx1), min(y0, by0), max(y1, by1)
+        pad = 0.15 * max(x1 - x0, y1 - y0, 2000)
+        t = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+        lon, lat = t.transform([x0 - pad, x1 + pad, x0 - pad, x1 + pad], [y0 - pad, y0 - pad, y1 + pad, y1 + pad])
+        self.run("Downloading the Copernicus DEM (30 m)", download_copernicus,
+                 lambda path: self._load_dem(str(path), rebuild=True),
+                 min(lon), max(lon), min(lat), max(lat), folder)
+
+    def _dem_wells(self, wells):
+        """Compare well elevations with the DEM; replace them when collars are replaced too."""
+        if self.dem is None or not self.p_usedem.isChecked():
+            return
+        import numpy as np
+
+        from ..dem import sample
+
+        t = wells.table
+        z = sample(self.dem, t["x"], t["y"])
+        d = (t["ground"] - z).dropna()
+        if len(d):
+            self.log(f"Wells: elevation − DEM mean {d.mean():+.1f} m (± {d.std():.1f})"
+                     + (" → replaced by the DEM" if self.p_rectify.isChecked() else ""))
+        if self.p_rectify.isChecked():
+            wells.table["ground"] = np.where(np.isfinite(z), z, t["ground"])
 
     def _load_dem(self, path, rebuild=False):
         import numpy as np
@@ -1279,6 +1353,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Aquifer", "No water levels: choose a wells file or fill the "
                                                      "WaterLevels sheet.")
             return
+        self._dem_wells(wells)
+        self.wells = wells
+        if wells.note:
+            self.log(f"Wells: {wells.note}")
         reading = wells.readings[-1]
         if len(wells.readings) > 1:
             from PySide6.QtWidgets import QInputDialog
@@ -1312,6 +1390,34 @@ class MainWindow(QMainWindow):
             self.log(f"  {name}: {r['saturated_mcm']:,.1f} of {r['volume_mcm']:,.1f} MCM saturated "
                      f"({r['saturated_pct']:.0f} %){extra}")
         self.docs.setCurrentWidget(self.viewer)
+
+    def recharge(self):
+        if not self._need_model():
+            return
+        wells = getattr(self, "wells", None)
+        if wells is None or len(wells.readings) < 2:
+            QMessageBox.information(self, "Recharge", "Load observation wells with a pre- and a post-season "
+                                                      "reading first (Analysis ▸ Aquifer & storage).")
+            return
+        dlg = RechargeDialog(wells.readings, self.model.codes, self.project.legend, self._sy(), self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        v = dlg.values()
+        from ..recharge import wtf_recharge
+
+        def done(rr):
+            self.log(f"Recharge, water-table fluctuation method ({v['pre']} → {v['post']}):")
+            for line in rr.summary():
+                self.log("  " + line)
+            for _, r in rr.table.iterrows():
+                if r["volume_between_mcm"] > 0.5:
+                    sy = "no Sy (counted 0)" if r["specific_yield"] != r["specific_yield"] else f"Sy {r['specific_yield']:g}"
+                    self.log(f"    {self.project.legend.get(r['code']).name}: {r['volume_between_mcm']:,.1f} MCM "
+                             f"between the water tables × {sy} = {r['storage_change_mcm']:,.2f} MCM")
+            QMessageBox.information(self, "Recharge (water-table fluctuation)", "\n".join(rr.summary()))
+
+        self.run("Estimating recharge", wtf_recharge, done, self.model, wells, v["pre"], v["post"], v["sy"],
+                 v["draft"], v["other"], v["rainfall"], v["rif"], "idw", v["surface"])
 
     def property_model(self):
         if not self._need_model():
@@ -2081,3 +2187,61 @@ class InfluenceDialog(QDialog):
                       self.radius.value() or None, self.vmodel.currentText(),
                       self.range_.value() if fixed else None, self.sill.value() if fixed else None,
                       self.nugget.value() if fixed else None)
+
+
+class RechargeDialog(QDialog):
+    """Inputs of the water-table fluctuation method (GEC-2015)."""
+
+    def __init__(self, readings, codes, legend, sy, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Recharge – water-table fluctuation method")
+        self.readings = list(readings)
+        f = QFormLayout(self)
+        self.pre, self.post = QComboBox(), QComboBox()
+        for c in (self.pre, self.post):
+            c.addItems([str(r) for r in readings])
+        self.post.setCurrentIndex(len(readings) - 1)
+        self.rain = QDoubleSpinBox(minimum=0, maximum=10000, decimals=0, suffix=" mm", specialValueText="not given")
+        self.draft = QDoubleSpinBox(minimum=0, maximum=1e6, decimals=2, suffix=" MCM")
+        self.other = QDoubleSpinBox(minimum=0, maximum=1e6, decimals=2, suffix=" MCM")
+        self.rif = QDoubleSpinBox(minimum=0, maximum=1, decimals=3, singleStep=0.01, specialValueText="not given")
+        self.surface = QComboBox()
+        self.surface.addItem("Follows the ground (depth to water interpolated)", "depth")
+        self.surface.addItem("Contoured from well water-table elevations", "elevation")
+        f.addRow("Pre-season reading", self.pre)
+        f.addRow("Post-season reading", self.post)
+        f.addRow("Rainfall in the season", self.rain)
+        f.addRow("Gross draft in the season", self.draft)
+        f.addRow("Recharge from other sources", self.other)
+        f.addRow("RIF for comparison", self.rif)
+        f.addRow("Water table", self.surface)
+        f.addRow(QLabel("Specific yield of each unit (blank = not counted):"))
+        self.sy = {}
+        for c in codes:
+            e = QLineEdit(f"{sy[c]:g}" if c in sy else "")
+            e.setPlaceholderText("e.g. 0.015")
+            self.sy[c] = e
+            f.addRow(legend.get(c).name, e)
+        note = QLabel("Specific yield, draft, other sources and the RIF are your inputs (e.g. from GEC-2015 norms "
+                      "and field data); none are assumed.")
+        note.setObjectName("Dim")
+        note.setWordWrap(True)
+        f.addRow(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def values(self):
+        sy = {}
+        for c, e in self.sy.items():
+            try:
+                v = float(e.text())
+                if v > 0:
+                    sy[c] = v
+            except ValueError:
+                pass
+        return {"pre": self.readings[self.pre.currentIndex()], "post": self.readings[self.post.currentIndex()], "sy": sy,
+                "draft": self.draft.value(), "other": self.other.value(),
+                "rainfall": self.rain.value() or None, "rif": self.rif.value() or None,
+                "surface": self.surface.currentData()}
