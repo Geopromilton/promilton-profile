@@ -723,3 +723,17 @@ def test_horizon_constraints(tmp_path):
     k = load_constraints(tmp_path / "c.kml", crs="EPSG:32643")
     assert [(i.target, i.kind) for i in k.items] == [("h4", "pinchout"), ("c:3", "thickness")]
     assert k.items[1].value == 12 and k.items[0].xy[0, 0] > 100000
+
+
+def test_wells_degrees_in_xy_swapped_and_duplicates(tmp_path):
+    from litholog.aquifer import load_wells
+
+    (tmp_path / "w.csv").write_text("S.No,Village Name,X,Y,Elevation,GWL-PRM,GWL-POM\n"
+                                    "1,A,8.55,77.67,105,3.6,1.2\n2,B,8.53,77.68,109,6.2,0.9\n"
+                                    "3,A,8.45,77.70,100,8.0,2.0\n")
+    # boreholes around 8.5 N 77.7 E in UTM 43N: X column is latitude, Y longitude
+    w = load_wells(tmp_path / "w.csv", near=(780000, 810000, 918000, 946000))
+    assert w.readings == ["GWL-PRM", "GWL-POM"]                  # S.No is not a reading
+    assert list(w.table["well_id"]) == ["A (1)", "B", "A (2)"]     # village names, duplicates kept apart
+    assert 780000 < w.table["x"].iloc[0] < 810000 and 930000 < w.table["y"].iloc[0] < 950000
+    assert "swapped" in w.note and w.table["ground"].iloc[0] == 105

@@ -25,7 +25,8 @@ from .io import normalize
 
 ALIASES = {
     "well_id": ["well_id", "well", "well_no", "station", "station_name", "site", "site_name", "name", "id",
-                "borehole_id", "borehole", "location", "village"],
+                "borehole_id", "borehole", "location", "village", "village_name", "well_name", "location_name",
+                "station_id", "site_id"],
     "x": ["x", "easting", "utm_x", "east"],
     "y": ["y", "northing", "utm_y", "north"],
     "lat": ["lat", "latitude", "lat_dd", "y_lat"],
@@ -66,8 +67,43 @@ def utm_epsg(lon: float, lat: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
-def load_wells(path, crs: str | None = None) -> Wells:
-    """Read observation wells (CSV/Excel, long or wide format)."""
+SERIAL = {"s_no", "sno", "sl_no", "slno", "sr_no", "srno", "serial", "serial_no", "no", "s_n", "sl", "index"}
+
+
+def _degrees(v) -> bool:
+    v = pd.to_numeric(v, errors="coerce").dropna()
+    return len(v) > 0 and v.abs().max() <= 180 and (v.max() - v.min()) < 20
+
+
+def _lonlat_order(a, b, near):
+    """Which of two degree columns is longitude? Returns (lon, lat, note)."""
+    a, b = pd.to_numeric(a, errors="coerce"), pd.to_numeric(b, errors="coerce")
+    if a.abs().max() > 90:
+        return a, b, ""
+    if b.abs().max() > 90:
+        return b, a, " (X was latitude, Y longitude: swapped)"
+    if near is not None:
+        from pyproj import Transformer
+
+        cx, cy = (near[0] + near[1]) / 2, (near[2] + near[3]) / 2
+
+        def miss(lon, lat):
+            t = Transformer.from_crs("EPSG:4326", f"EPSG:{utm_epsg(float(lon.median()), float(lat.median()))}",
+                                     always_xy=True)
+            x, y = t.transform(float(lon.median()), float(lat.median()))
+            return abs(x - cx) + abs(y - cy)
+
+        if miss(b, a) < miss(a, b):
+            return b, a, " (X was latitude, Y longitude: swapped to match the boreholes)"
+    return a, b, ""
+
+
+def load_wells(path, crs: str | None = None, near=None) -> Wells:
+    """Read observation wells (CSV/Excel, long or wide format).
+
+    X/Y columns holding degrees are treated as longitude/latitude (in either order; ``near`` = the
+    boreholes' (xmin, xmax, ymin, ymax) decides which is which when the values allow both).
+    """
     path = Path(path)
     if path.suffix.lower() in (".xlsx", ".xls"):
         df = pd.read_excel(path)
@@ -82,7 +118,19 @@ def load_wells(path, crs: str | None = None) -> Wells:
         df.insert(0, "_well", [f"W{i + 1}" for i in range(len(df))])
         c_id = "_well"
     note = ""
-    out = pd.DataFrame({"well_id": df[c_id].astype(str).str.strip()})
+    ids = df[c_id].astype(str).str.strip()
+    dup = ids.duplicated(keep=False)
+    if dup.any():   # same name at different places (e.g. two wells in one village): keep both, distinctly
+        ids = ids.where(~dup, ids + " (" + (ids.groupby(ids).cumcount() + 1).astype(str) + ")")
+        note += f"duplicate well names numbered: {', '.join(sorted(set(ids[dup].str.rsplit(' (', n=1).str[0])))}; "
+    out = pd.DataFrame({"well_id": ids})
+    if c_x is not None and c_y is not None and _degrees(df[c_x]) and _degrees(df[c_y]):
+        c_lon, c_lat = c_x, c_y
+        lon, lat, swap = _lonlat_order(df[c_x], df[c_y], near)
+        df = df.assign(_lon=lon, _lat=lat)
+        c_lon, c_lat, c_x, c_y = "_lon", "_lat", None, None
+        cols = list(df.columns)
+        note = "X/Y are in degrees" + swap + "; "
     if c_x is not None and c_y is not None:
         out["x"] = pd.to_numeric(df[c_x], errors="coerce")
         out["y"] = pd.to_numeric(df[c_y], errors="coerce")
@@ -94,12 +142,14 @@ def load_wells(path, crs: str | None = None) -> Wells:
         target = crs or f"EPSG:{utm_epsg(float(lon.median()), float(lat.median()))}"
         t = Transformer.from_crs("EPSG:4326", target, always_xy=True)
         out["x"], out["y"] = t.transform(lon.to_numpy(), lat.to_numpy())
-        note = f"latitude/longitude converted to {target}"
+        note += f"latitude/longitude converted to {target}"
     else:
         raise ValueError(f"{path.name}: needs X/Y (easting/northing) or Latitude/Longitude columns")
     out["ground"] = pd.to_numeric(df[c_g], errors="coerce") if c_g is not None else np.nan
 
     used = {c for c in (c_id, c_x, c_y, c_lat, c_lon, c_g, c_date, c_dtw) if c is not None}
+    used |= {c for c in cols if normalize(c) in SERIAL or c in ("_lon", "_lat")}
+    used |= {c for c in cols if normalize(c) in ("x", "y")}
     if c_dtw is not None and c_date is not None:  # long format: pivot readings into columns
         long = out.copy()
         long["date"] = df[c_date].astype(str).str.strip()

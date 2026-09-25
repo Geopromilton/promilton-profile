@@ -138,7 +138,7 @@ def map_figure(grid: Grid, vals: pd.DataFrame, attr: str, legend=None, method: s
     n_all = len(vals)
     n_ok = len(good)
     lines = [
-        ("Boreholes used", f"{n_ok} of {n_all}"),
+        ("Wells used" if attr.split(":")[0] in ("water", "dtw", "rise") else "Boreholes used", f"{n_ok} of {n_all}"),
         ("Minimum", f"{good['value'].min():.2f} {unit}"),
         ("Maximum", f"{good['value'].max():.2f} {unit}"),
         ("Mean", f"{good['value'].mean():.2f} {unit}"),

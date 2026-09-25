@@ -37,6 +37,7 @@ def attribute_label(attr: str, legend=None) -> tuple[str, str]:
         "water": ("Water-table elevation", "m amsl"),
         "dtw": ("Depth to water", "m bgl"),
         "total_depth": ("Drilled depth", "m"),
+        "rise": ("Water-level rise (fluctuation)", "m"),
     }.get(kind, (attr, ""))
 
 

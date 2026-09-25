@@ -134,6 +134,7 @@ def main(argv=None) -> int:
     aq.add_argument("--dem", help="DEM used as the ground surface")
     aq.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
     aq.add_argument("-o", "--out", default="aquifer")
+    aq.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
     aq.add_argument("--title")
     aq.add_argument("-l", "--legend")
 
@@ -560,7 +561,9 @@ def _aquifer(a):
 
     project = load_project(a.data, legend=a.legend)
     boundary = _boundary(a, project)
-    wells = load_wells(a.wells, crs=a.crs) if a.wells else wells_from_project(project)
+    b = project.boreholes.dropna(subset=["x", "y"])
+    near = (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()) if len(b) else None
+    wells = load_wells(a.wells, crs=a.crs, near=near) if a.wells else wells_from_project(project)
     if wells is None:
         print("No water levels: give --wells, or fill the WaterLevels sheet.", file=sys.stderr)
         return 2
@@ -577,9 +580,9 @@ def _aquifer(a):
         wt = water_table(model, wells, r, a.method)
         vals = wt.wells.rename(columns={"well_id": "borehole_id"})
         tag = _safe(str(r))
-        save_map(wt.grid, vals.assign(value=vals["wt"]), "water", out / f"water_table_{tag}.pdf",
+        save_map(wt.grid, vals.assign(value=vals["wt"]), "water", out / f"water_table_{tag}.{a.format}",
                  method=a.method, title=f"{title} · {r}")
-        save_map(wt.dtw, vals.assign(value=vals["dtw"]), "dtw", out / f"depth_to_water_{tag}.pdf",
+        save_map(wt.dtw, vals.assign(value=vals["dtw"]), "dtw", out / f"depth_to_water_{tag}.{a.format}",
                  method=a.method, title=f"{title} · {r}")
         v = saturated_volumes(model, wt, sy)
         v.insert(1, "name", [project.legend.get(c).name for c in v["code"]])
@@ -587,11 +590,28 @@ def _aquifer(a):
         tables[r] = v
         for code in sy:
             th = saturated_thickness(model, wt, code)
-            save_map(th, vals.assign(value=np.nan), f"thickness:{code}", out / f"saturated_thickness_{code}_{tag}.pdf",
+            save_map(th, vals.assign(value=np.nan), f"thickness:{code}", out / f"saturated_thickness_{code}_{tag}.{a.format}",
                      legend=project.legend, title=f"{title} · saturated · {r}")
         print(f"\n{r}: {len(wt.wells)} wells, water table {np.nanmin(wt.grid.z):.1f}–{np.nanmax(wt.grid.z):.1f} m")
         cols = ["code", "name", "volume_mcm", "saturated_mcm", "saturated_pct"] + (["storage_mcm"] if sy else [])
         print(v[cols].round(1).to_string(index=False))
+    if len(readings) >= 2:
+        r0, r1 = readings[0], readings[-1]
+        w0 = water_table(model, wells, r0, a.method)
+        w1 = water_table(model, wells, r1, a.method)
+        from dataclasses import replace
+
+        rise = replace(w1.grid, z=w1.grid.z - w0.grid.z)
+        v0 = wells.values(r0).set_index("well_id")["dtw"]
+        v1 = wells.values(r1).set_index("well_id")["dtw"]
+        pts = wells.values(r1).rename(columns={"well_id": "borehole_id"})
+        pts = pts.assign(value=(v0.reindex(pts["borehole_id"]).to_numpy() - v1.reindex(pts["borehole_id"]).to_numpy()))
+        save_map(rise, pts, "rise", out / f"water_level_rise_{_safe(str(r0))}_to_{_safe(str(r1))}.{a.format}",
+                 method=a.method, title=f"{title} · {r0} → {r1}")
+        area = float(np.nansum(np.where(rise.valid, 1, 0))) * rise.cell ** 2
+        mean_rise = float(np.nanmean(np.where(rise.valid, rise.z, np.nan)))
+        print(f"\nWater-level change {r0} → {r1}: mean {mean_rise:+.2f} m over {area / 1e6:,.1f} km² "
+              f"(wells: {np.nanmean(v0 - v1.reindex(v0.index)):+.2f} m)")
     if len(readings) >= 2 and sy:
         r0, r1 = readings[0], readings[-1]
         d = tables[r1][["code", "name"]].copy()

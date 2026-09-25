@@ -1269,7 +1269,9 @@ class MainWindow(QMainWindow):
             self, "Observation wells (Cancel = use water levels in the borehole data)", "",
             "Wells (*.xlsx *.xls *.csv *.txt)")
         try:
-            wells = load_wells(path) if path else wells_from_project(self.project)
+            b = self.project.boreholes.dropna(subset=["x", "y"])
+            near = (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()) if len(b) else None
+            wells = load_wells(path, near=near) if path else wells_from_project(self.project)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Aquifer", str(e))
             return
