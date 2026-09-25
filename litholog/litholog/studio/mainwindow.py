@@ -21,6 +21,7 @@ from .viewer3d import Viewer3D
 from .widgets import FigureDoc, Job, Ribbon
 
 DEMO = Path(__file__).resolve().parents[1] / "data" / "sample_project.xlsx"
+TUTORIAL = Path(__file__).resolve().parents[1] / "data" / "tutorial"
 MAP_KINDS = {"ground": "Ground elevation", "top": "Top of unit", "base": "Base of unit",
              "depth": "Depth to unit", "thickness": "Thickness (isopach)", "water": "Water-table elevation",
              "dtw": "Depth to water", "total_depth": "Drilled depth"}
@@ -88,7 +89,7 @@ class MainWindow(QMainWindow):
             ("legend", "mdi6.palette-outline", "Legend", self.open_legend, False),
             ("boundary", "mdi6.vector-polygon", "Boundary", self.open_boundary, False),
             ("dem", "mdi6.terrain", "DEM", self.open_dem, False),
-            ("demo", "mdi6.flask-outline", "Demo project", self.open_demo, False),
+            ("demo", "mdi6.school-outline", "Tutorial\nproject", self.open_demo, False),
         ])
         r.group(home, "Output", [
             ("shot", "mdi6.camera-outline", "Save image", self.save_image, False),
@@ -440,7 +441,13 @@ class MainWindow(QMainWindow):
             self.load(path)
 
     def open_demo(self):
-        self.load(str(DEMO), name="Demo project (synthetic)")
+        """The tutorial project (synthetic hard-rock site) used in the user manual."""
+        t = TUTORIAL / "tutorial_boreholes.xlsx"
+        if t.exists():
+            self.load(str(t), name="Tutorial site (synthetic)", boundary=str(TUTORIAL / "tutorial_boundary.geojson"))
+            self.log(f"Tutorial files (water levels, chemistry, constraints) are in {TUTORIAL}")
+        else:
+            self.load(str(DEMO), name="Demo project (synthetic)")
 
     def load(self, path, legend=None, name=None, boundary=None, after=None):
         from ..io import load_project

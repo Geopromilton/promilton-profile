@@ -32,4 +32,4 @@ litholog-studio = "litholog.studio:main"
 packages = ["litholog", "litholog.studio"]
 
 [tool.setuptools.package-data]
-litholog = ["data/*.xlsx", "fonts/*.ttf", "fonts/*.txt"]
+litholog = ["data/*.xlsx", "data/tutorial/*", "fonts/*.ttf", "fonts/*.txt"]

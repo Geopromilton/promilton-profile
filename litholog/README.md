@@ -15,6 +15,10 @@ model with volumes and groundwater-storage estimates — as PDF, PNG or SVG.
 
 ![Example strip log](docs/BW-01.png)
 
+**User manual:** [docs/LithoLog_Studio_User_Manual.docx](docs/LithoLog_Studio_User_Manual.docx) — every feature
+explained with screenshots, using the tutorial project (Home ▸ Tutorial project; synthetic data in
+`litholog/data/tutorial`).
+
 ## The browser app (no command line needed)
 
 ```bash
