@@ -177,6 +177,34 @@ boreholes' system with `--crs EPSG:32643`; if you don't and the boundary is in a
 not overlap the boreholes, the neighbouring UTM zone that does is used (and reported) — a common
 mix-up near zone edges.
 
+## Groundwater, properties, layers, chemistry and fractures
+
+```bash
+litholog aquifer  data.xlsx --wells wells.xlsx --sy FRAC=0.015 --boundary area.shp
+litholog property data.xlsx -p Resistivity --below 100
+litholog strat    data.xlsx --order TOP ALLUV CLAY SAND BASEMENT
+litholog chem     water_quality.xlsx -o chemistry
+litholog fractures data.xlsx
+litholog section  data.xlsx -b BH1 BH2 BH3 --style logs --curve Resistivity
+```
+
+* **Aquifer** — observation wells in any common layout (one row per reading, or one column per
+  season as in CGWB / India-WRIS tables; X/Y or latitude/longitude, converted automatically) →
+  water-table and depth-to-water maps, *saturated* volume and storage of each unit, saturated
+  thickness maps, and the storage change between seasons.
+* **Property models** — downhole readings (resistivity, EC, yield, …) interpolated in 3D
+  (anisotropic inverse distance, log scale for resistivity-like data): slices, an interactive
+  3D volume, VTK, and the volume within a value range.
+* **Stratigraphic models** — ordered formation tops → non-crossing surfaces → solids and volumes.
+* **Hydrochemistry** — ionic balance, water type, SAR, %Na, RSC, Kelly's ratio, PI, MH; Piper,
+  Durov, Stiff, USSL (Richards 1954), Wilcox (1955) classes and Gibbs diagrams.
+* **Fractures** — a Fractures sheet (depth, dip, dip direction, aperture, water-strike yield):
+  strike rose, equal-area stereonet with pole density, frequency with depth, and a tadpole track on
+  strip logs.
+* **Log sections** — strip logs placed along a section line with a downhole curve beside each.
+
+All of these are also in LithoLog Studio (ribbon ▸ Analysis).
+
 ## Commands
 
 ```
@@ -223,7 +251,9 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 - [x] **M2** Cross-sections (hole-to-hole or along any line), 3D fence diagrams
 - [x] **M3** Contour maps (surfaces, isopachs, water table), 3D block model, volumes, storage
 - [x] **M4** Browser app, smooth 3D solids with standard views, interactive 3D viewer
-- [ ] Next: own repository, hosted app, KMZ/DXF export, saturated volume from water levels
+- [x] **M5** Desktop app (LithoLog Studio) with Windows installer; aquifer/storage, property models,
+      stratigraphy, hydrochemistry, fractures, log sections
+- [ ] Next: KMZ/DXF export, faults, database connection
 
 ## Development
 

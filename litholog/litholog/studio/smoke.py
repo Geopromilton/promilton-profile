@@ -100,8 +100,28 @@ def check(report_path: str) -> int:
         x, y = Transformer.from_crs(32644, 32643, always_xy=True).transform(130000, 930000)
         assert 790000 < x < 800000
 
+    def analysis():
+        import pandas as pd
+
+        from ..aquifer import saturated_volumes, water_table, wells_from_project
+        from ..fractures import fracture_figure
+        from ..hydrochem import analyse, load_chemistry, piper
+        from ..property3d import build_property
+        from ..strat import build_strat_model
+
+        p, m = state["p"], state["m"]
+        saturated_volumes(m, water_table(m, wells_from_project(p)))
+        build_property(p, m, "Resistivity")
+        build_strat_model(p, ["RSOIL", "WGRA", "GRA"])
+        fracture_figure(p)
+        chem = load_chemistry(pd.DataFrame({"Ca": [40], "Mg": [24], "Na": [46], "K": [0], "HCO3": [183],
+                                            "Cl": [71], "SO4": [10], "EC": [500]}))
+        analyse(chem)
+        piper(chem)
+
     for name, fn in [("load demo", load), ("strip log PDF", logs), ("cross-section PDF", section),
                      ("kriged map PDF", maps), ("3D model + smooth solids", model),
+                     ("aquifer, property, strat, fractures, chemistry", analysis),
                      ("GUI libraries (Qt, VTK, icons)", gui_imports), ("reprojection (PROJ data)", reproject)]:
         step(name, fn)
     Path(report_path).write_text("\n".join(lines) + f"\n\nRESULT: {'PASS' if ok else 'FAIL'}\n")

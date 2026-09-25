@@ -126,6 +126,55 @@ class Viewer3D(QWidget):
             location="outer", ticks="outside", minor_ticks=False,
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
 
+    def show_surface(self, model, z, ve, color="#2E86DE", opacity=0.55, name="surface", label=None):
+        """A gridded surface (e.g. the water table) in the model's XY grid."""
+        X, Y = np.meshgrid(model.x, model.y)
+        grid = pv.StructuredGrid(X, Y, np.nan_to_num(z, nan=np.nanmin(z)) * ve)
+        grid["valid"] = np.isfinite(z).ravel(order="F").astype(float)
+        surf = grid.threshold(0.5, scalars="valid")
+        self.extras[name] = self.plotter.add_mesh(surf, color=color, opacity=opacity, smooth_shading=True,
+                                                  name=name, specular=0.4, show_scalar_bar=False)
+        if label:
+            self.plotter.add_text(label, position="lower_left", font_size=9, color=color, name=f"{name}_label")
+        self.plotter.render()
+
+    def remove(self, name):
+        self.plotter.remove_actor(name, render=False)
+        self.plotter.remove_actor(f"{name}_label", render=False)
+        self.extras.pop(name, None)
+        self.plotter.render()
+
+    def show_property(self, pm, ve, lo=None, hi=None, log=None, cmap=None):
+        """Voxels of a property model within [lo, hi], coloured by value, with a colour bar."""
+        m = pm.model
+        self.clear()
+        img = pv.ImageData(dimensions=(len(m.x) + 1, len(m.y) + 1, len(m.z) + 1),
+                           spacing=(m.cell, m.cell, m.dz * ve),
+                           origin=(m.x[0] - m.cell / 2, m.y[0] - m.cell / 2, (m.z[0] - m.dz / 2) * ve))
+        v = np.transpose(pm.values, (2, 1, 0)).ravel(order="F")
+        img.cell_data[pm.parameter] = v
+        finite = v[np.isfinite(v)]
+        if log is None:
+            log = finite.size and finite.min() > 0 and finite.max() / finite.min() > 50
+        lo = finite.min() if lo is None else lo
+        hi = finite.max() if hi is None else hi
+        sel = img.threshold([lo, hi], scalars=pm.parameter)
+        title = pm.parameter + (f" ({pm.unit})" if pm.unit else "")
+        self.units["property"] = self.plotter.add_mesh(
+            sel, scalars=pm.parameter, cmap=cmap or ("Spectral_r" if log else "viridis"), log_scale=bool(log),
+            clim=[finite.min(), finite.max()], smooth_shading=False, name="property", show_edges=False,
+            scalar_bar_args=dict(title=title, color=theme.TEXT, vertical=True, position_x=0.88,
+                                 position_y=0.2, height=0.6, title_font_size=12, label_font_size=10))
+        self._model = m
+        self.ve = ve
+        if m.holes:
+            from ..patterns import Legend
+
+            self._add_boreholes(m, Legend(), ve, True, None)
+        self._grid(m, ve)
+        self.plotter.reset_camera()
+        self.set_view("iso_sw")
+
     # ------------------------------------------------------------------
     def set_view(self, name: str):
         if name not in VIEW_DIRS:

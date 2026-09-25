@@ -124,6 +124,17 @@ def frequency(ax, f: pd.DataFrame, bin_m=10.0):
 
 def fracture_report(project, path, borehole=None, title: str = "") -> Path:
     """One A4-landscape page: rose, stereonet, frequency and summary."""
+    import matplotlib.pyplot as plt
+
+    fig = fracture_figure(project, borehole, title)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    return path
+
+
+def fracture_figure(project, borehole=None, title: str = ""):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -152,8 +163,4 @@ def fracture_report(project, path, borehole=None, title: str = "") -> Path:
              fontsize=9, color="#444444")
     fig.text(0.04, 0.03, "Equal-area (Schmidt) net, lower hemisphere. Strike rose uses the right-hand rule "
                          "(strike = dip direction − 90°), plotted bidirectionally.", fontsize=7, color="#777777")
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
-    return path
+    return fig

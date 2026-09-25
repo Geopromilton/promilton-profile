@@ -108,6 +108,22 @@ class MainWindow(QMainWindow):
             ("vtk", "mdi6.database-export-outline", "ParaView", self.export_vtk, False),
             ("csv", "mdi6.table-arrow-right", "Volumes", self.export_volumes, False),
         ])
+        an = r.page("Analysis")
+        r.group(an, "Groundwater", [
+            ("aquifer", "mdi6.water-outline", "Aquifer &\nstorage", self.aquifer, False),
+        ])
+        r.group(an, "3D properties", [
+            ("prop", "mdi6.chart-bubble", "Property\nmodel", self.property_model, False),
+        ])
+        r.group(an, "Layers", [
+            ("strat", "mdi6.layers-outline", "Stratigraphy\nmodel", self.strat_model, False),
+        ])
+        r.group(an, "Chemistry", [
+            ("chem", "mdi6.flask-round-bottom-outline", "Hydro-\nchemistry", self.hydrochemistry, False),
+        ])
+        r.group(an, "Structure", [
+            ("fract", "mdi6.compass-outline", "Fractures", self.show_fractures, False),
+        ])
         self.setMenuWidget(r)
 
     def _build_documents(self):
@@ -120,11 +136,15 @@ class MainWindow(QMainWindow):
         self.doc_sec = FigureDoc("Sections ▸ New section to draw a cross-section.")
         self.doc_fence = FigureDoc("Sections ▸ Fence diagram.")
         self.doc_map = FigureDoc("Maps ▸ New map to draw a contour map.")
+        self.doc_chem = ChemDoc()
+        self.doc_fract = FigureDoc("Analysis ▸ Fractures (needs a Fractures sheet in the data).")
         for w, name, ic in [(self.viewer, "3D Model", "mdi6.cube-outline"),
                             (self.doc_log, "Strip Log", "mdi6.format-list-text"),
                             (self.doc_sec, "Cross-Section", "mdi6.chart-timeline-variant"),
                             (self.doc_fence, "Fence", "mdi6.fence"),
-                            (self.doc_map, "Map", "mdi6.map-outline")]:
+                            (self.doc_map, "Map", "mdi6.map-outline"),
+                            (self.doc_chem, "Chemistry", "mdi6.flask-round-bottom-outline"),
+                            (self.doc_fract, "Fractures", "mdi6.compass-outline")]:
             self.docs.addTab(w, theme.icon(ic, theme.TEXT_DIM), name)
         self.setCentralWidget(self.docs)
 
@@ -648,12 +668,13 @@ class MainWindow(QMainWindow):
         dlg = SectionDialog(self.project, self)
         if dlg.exec() != QDialog.Accepted:
             return
-        ids, name, ve, datum = dlg.values()
+        ids, name, ve, datum, style, curve = dlg.values()
         from ..section import section_figure, through_boreholes
 
         try:
             line = through_boreholes(self.project, ids, name)
-            fig = section_figure(self.project, line, ve=ve or None, title=self._title(), datum=datum)
+            fig = section_figure(self.project, line, ve=ve or None, title=self._title(), datum=datum,
+                                 style=style, curve=curve)
         except ValueError as e:
             QMessageBox.warning(self, "Section", str(e))
             return
@@ -694,6 +715,141 @@ class MainWindow(QMainWindow):
         self.doc_map.set_figure(fig)
         self.docs.setCurrentWidget(self.doc_map)
         self.log(f"Map {attr} ({method}).")
+
+    # ------------------------------------------------------------------ analysis
+    def aquifer(self):
+        if not self._need_model():
+            return
+        from ..aquifer import load_wells, saturated_volumes, water_table, wells_from_project
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Observation wells (Cancel = use water levels in the borehole data)", "",
+            "Wells (*.xlsx *.xls *.csv *.txt)")
+        try:
+            wells = load_wells(path) if path else wells_from_project(self.project)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Aquifer", str(e))
+            return
+        if wells is None:
+            QMessageBox.information(self, "Aquifer", "No water levels: choose a wells file or fill the "
+                                                     "WaterLevels sheet.")
+            return
+        reading = wells.readings[-1]
+        if len(wells.readings) > 1:
+            from PySide6.QtWidgets import QInputDialog
+
+            reading, ok = QInputDialog.getItem(self, "Aquifer", "Water-level reading / season:",
+                                               [str(r) for r in wells.readings], len(wells.readings) - 1, False)
+            if not ok:
+                return
+        try:
+            wt = water_table(self.model, wells, reading)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Aquifer", str(e))
+            return
+        self.water_table = wt
+        sy = self._sy()
+        v = saturated_volumes(self.model, wt, sy)
+        from ..maps import map_figure
+
+        vals = wt.wells.rename(columns={"well_id": "borehole_id"})
+        fig = map_figure(wt.grid, vals.assign(value=vals["wt"]), "water", title=f"{self._title()} · {reading}")
+        self.doc_map.set_figure(fig)
+        self.viewer.show_surface(self.model, wt.grid.z, self.viewer.ve, name="water_table",
+                                 label=f"Water table · {reading}")
+        if self.p_opacity.value() > 45:  # see the water table through the solids
+            self.p_opacity.setValue(40)
+        self.log(f"Water table ({reading}) from {len(wt.wells)} wells{(' · ' + wells.note) if wells.note else ''}.")
+        for _, r in v.iterrows():
+            name = self.project.legend.get(r["code"]).name
+            extra = f", storage {r['storage_mcm']:,.2f} MCM" if "storage_mcm" in r and r["storage_mcm"] == r["storage_mcm"] else ""
+            self.log(f"  {name}: {r['saturated_mcm']:,.1f} of {r['volume_mcm']:,.1f} MCM saturated "
+                     f"({r['saturated_pct']:.0f} %){extra}")
+        self.docs.setCurrentWidget(self.viewer)
+
+    def property_model(self):
+        if not self._need_model():
+            return
+        from ..property3d import build_property, parameters, property_slices
+
+        params = parameters(self.project)
+        if not params:
+            QMessageBox.information(self, "Property model", "No downhole readings (Downhole sheet).")
+            return
+        dlg = PropertyDialog(params, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        param, lo, hi = dlg.values()
+        datum = self.p_datum.currentData()
+
+        def done(pm):
+            self.property = pm
+            ve = self.p_ve.value() or self._auto_ve()
+            self.viewer.show_property(pm, ve, lo, hi)
+            st = pm.stats()
+            self.log(f"{param} model: {st['min']:.4g}–{st['max']:.4g} {pm.unit}; shown "
+                     f"{lo if lo is not None else st['min']:.4g}–{hi if hi is not None else st['max']:.4g}, "
+                     f"volume {pm.volume_between(lo, hi) / 1e6:,.2f} MCM")
+            self.docs.setCurrentWidget(self.viewer)
+
+        self.run(f"Interpolating {param} in 3D", build_property, done, self.project, self.model, param,
+                 datum=datum)
+
+    def strat_model(self):
+        if not self.need_project():
+            return
+        dlg = StratDialog(self.project, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        from ..strat import build_strat_model
+
+        order = dlg.values()
+        b = self.boundary if self.p_clipb.isChecked() else None
+
+        def done(model):
+            self.model = model
+            self._refresh_tree()
+            self.redraw(reset_view=True)
+            self._fill_volumes()
+            self.log(f"Stratigraphic model: {' / '.join(self.project.legend.get(c).name for c in order)}")
+            self.docs.setCurrentWidget(self.viewer)
+
+        self.run("Building stratigraphic model", build_strat_model, done, self.project, order,
+                 self.p_cell.value() or None, self.p_dz.value() or None, boundary=b)
+
+    def hydrochemistry(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Water-quality data", "", "Chemistry (*.xlsx *.xls *.csv)")
+        if not path:
+            return
+        from ..hydrochem import analyse, load_chemistry
+
+        try:
+            df = load_chemistry(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Hydrochemistry", str(e))
+            return
+        self.doc_chem.set_data(df, self._title())
+        res = analyse(df)
+        self.chem_results = res
+        self.log(f"Hydrochemistry: {len(df)} samples; water types " +
+                 ", ".join(f"{k} ({v})" for k, v in res["water_type"].value_counts().items()))
+        bad = res[~res["balance_ok_5pct"]]
+        if len(bad):
+            self.log(f"  ionic balance outside ±5 %: {', '.join(bad['sample'])}")
+        self.docs.setCurrentWidget(self.doc_chem)
+
+    def show_fractures(self):
+        if not self.need_project():
+            return
+        from ..fractures import fracture_figure
+
+        try:
+            fig = fracture_figure(self.project, None, self._title())
+        except ValueError as e:
+            QMessageBox.information(self, "Fractures", str(e))
+            return
+        self.doc_fract.set_figure(fig)
+        self.docs.setCurrentWidget(self.doc_fract)
 
     # ------------------------------------------------------------------ export
     def save_image(self):
@@ -804,9 +960,18 @@ class SectionDialog(QDialog):
         self.datum = QComboBox()
         self.datum.addItem("Elevation", "elevation")
         self.datum.addItem("Depth (flat ground)", "depth")
+        self.style = QCheckBox("Log section (strip logs along the line)")
+        self.curve = QComboBox()
+        self.curve.addItem("No curve", None)
+        from ..property3d import parameters
+
+        for prm in parameters(project):
+            self.curve.addItem(prm, prm)
         f.addRow("Name", self.name)
         f.addRow("Vertical exaggeration", self.ve)
         f.addRow("Hang holes by", self.datum)
+        f.addRow("", self.style)
+        f.addRow("Curve beside logs", self.curve)
         v.addLayout(f)
         h = QHBoxLayout()
         self.all = QListWidget()
@@ -851,7 +1016,8 @@ class SectionDialog(QDialog):
 
     def values(self):
         ids = [self.sel.item(i).text() for i in range(self.sel.count())]
-        return ids, self.name.text() or "A-A'", self.ve.value(), self.datum.currentData()
+        return (ids, self.name.text() or "A-A'", self.ve.value(), self.datum.currentData(),
+                "logs" if self.style.isChecked() else "section", self.curve.currentData())
 
 
 class MapDialog(QDialog):
@@ -890,3 +1056,141 @@ class MapDialog(QDialog):
         k = self.kind.currentData()
         attr = f"{k}:{self.unit.currentData()}" if k in ("top", "base", "depth", "thickness") else k
         return attr, self.method.currentData(), self.cell.value(), self.clip.isChecked()
+
+
+class PropertyDialog(QDialog):
+    def __init__(self, params, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("3D property model")
+        f = QFormLayout(self)
+        self.param = QComboBox()
+        self.param.addItems(params)
+        self.use_lo = QCheckBox("Show values from")
+        self.lo = QDoubleSpinBox(minimum=-1e9, maximum=1e9, decimals=3)
+        self.use_hi = QCheckBox("Show values up to")
+        self.hi = QDoubleSpinBox(minimum=-1e9, maximum=1e9, decimals=3, value=100)
+        f.addRow("Parameter", self.param)
+        f.addRow(self.use_lo, self.lo)
+        f.addRow(self.use_hi, self.hi)
+        hint = QLabel("e.g. resistivity up to 100 ohm-m to see low-resistivity (weathered/fractured) zones.")
+        hint.setObjectName("Dim")
+        hint.setWordWrap(True)
+        f.addRow(hint)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        f.addRow(bb)
+
+    def values(self):
+        return (self.param.currentText(), self.lo.value() if self.use_lo.isChecked() else None,
+                self.hi.value() if self.use_hi.isChecked() else None)
+
+
+class StratDialog(QDialog):
+    """Pick formations and put them in order, top to bottom."""
+
+    def __init__(self, project, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Stratigraphic model")
+        self.resize(420, 460)
+        v = QVBoxLayout(self)
+        lab = QLabel("Tick the formations and drag them into order, top (youngest) to bottom. "
+                     "Each formation should occur once per hole; repeats use their first top.")
+        lab.setWordWrap(True)
+        lab.setObjectName("Dim")
+        v.addWidget(lab)
+        self.list = QListWidget()
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        codes = list(dict.fromkeys(c for c in project.lithology["code"] if c))
+        # initial order: by average top depth
+        depth = project.lithology.groupby("code")["from"].mean()
+        for c in sorted(codes, key=lambda c: depth.get(c, 0)):
+            it = QListWidgetItem(swatch(project.legend.get(c).color), f"{project.legend.get(c).name}  ({c})")
+            it.setData(Qt.UserRole, c)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked)
+            self.list.addItem(it)
+        v.addWidget(self.list)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def values(self):
+        return [self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())
+                if self.list.item(i).checkState() == Qt.Checked]
+
+
+class ChemDoc(QWidget):
+    """Hydrochemistry document: pick a diagram or the results table."""
+
+    DIAGRAMS = ["Piper", "Durov", "Stiff", "USSL", "Wilcox", "Gibbs", "Results table"]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        top.setContentsMargins(8, 6, 8, 6)
+        self.combo = QComboBox()
+        self.combo.addItems(self.DIAGRAMS)
+        self.combo.currentIndexChanged.connect(self._show)
+        top.addWidget(QLabel("Diagram"))
+        top.addWidget(self.combo)
+        top.addStretch(1)
+        v.addLayout(top)
+        self.fig = FigureDoc("Analysis ▸ Hydrochemistry to open water-quality data "
+                             "(Sample, Ca, Mg, Na, K, HCO3, CO3, Cl, SO4, EC, TDS, Group).")
+        self.table = QTableWidget()
+        self.table.hide()
+        v.addWidget(self.fig, 1)
+        v.addWidget(self.table, 1)
+        self.df = None
+        self.title = ""
+
+    def set_data(self, df, title=""):
+        self.df, self.title = df, title
+        self._show()
+
+    def _show(self):
+        if self.df is None:
+            return
+        import matplotlib.pyplot as plt
+
+        from .. import hydrochem as hc
+
+        name = self.combo.currentText()
+        res = hc.analyse(self.df)
+        if name == "Results table":
+            self.fig.hide()
+            self.table.show()
+            cols = [c for c in res.columns if not c.endswith("_meq")]
+            self.table.setColumnCount(len(cols))
+            self.table.setRowCount(len(res))
+            self.table.setHorizontalHeaderLabels(cols)
+            for i, (_, r) in enumerate(res[cols].iterrows()):
+                for j, c in enumerate(cols):
+                    self.table.setItem(i, j, QTableWidgetItem(str(r[c])))
+            self.table.resizeColumnsToContents()
+            return
+        self.table.hide()
+        self.fig.show()
+        has_ec = "ec" in self.df and self.df["ec"].notna().any()
+        if name == "Stiff":
+            fig = hc.stiff(self.df)
+        elif name == "Gibbs":
+            fig = hc.gibbs(self.df)
+        else:
+            fig, ax = plt.subplots(figsize=(9, 8))
+            if name == "Piper":
+                hc.piper(self.df, ax, f"Piper diagram – {self.title}" if self.title else "Piper diagram")
+            elif name == "Durov":
+                hc.durov(self.df, ax)
+            elif name in ("USSL", "Wilcox") and not has_ec:
+                ax.text(0.5, 0.5, "EC is needed for this diagram", ha="center", transform=ax.transAxes)
+                ax.set_axis_off()
+            elif name == "USSL":
+                hc.ussl(self.df, res, ax)
+            else:
+                hc.wilcox(self.df, res, ax)
+        self.fig.set_figure(fig)
