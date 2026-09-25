@@ -43,6 +43,8 @@ class MainWindow(QMainWindow):
         self.model = None
         self.solids = None
         self.data_path = None
+        self.legend_path = None
+        self.boundary_path = None
         self._current_map = None
 
         self._build_ribbon()
@@ -58,7 +60,11 @@ class MainWindow(QMainWindow):
     def _build_ribbon(self):
         r = self.ribbon = Ribbon()
         home = r.page("Home")
-        r.group(home, "Project", [
+        r.group(home, "Project file", [
+            ("proj_open", "mdi6.folder-star-outline", "Open project", self.open_project, False),
+            ("proj_save", "mdi6.content-save-outline", "Save project", self.save_project, False),
+        ])
+        r.group(home, "Data", [
             ("open", "mdi6.folder-open-outline", "Open data", self.open_data, False),
             ("legend", "mdi6.palette-outline", "Legend", self.open_legend, False),
             ("boundary", "mdi6.vector-polygon", "Boundary", self.open_boundary, False),
@@ -278,14 +284,27 @@ class MainWindow(QMainWindow):
     def open_demo(self):
         self.load(str(DEMO), name="Demo project (synthetic)")
 
-    def load(self, path, legend=None, name=None):
+    def load(self, path, legend=None, name=None, boundary=None, after=None):
         from ..io import load_project
 
         def done(project):
             if name:
                 project.name = name
             self.project, self.data_path, self.model, self.solids = project, path, None, None
-            self.boundary = None
+            self.legend_path = legend
+            self.boundary, self.boundary_path = None, None
+            if boundary:
+                from ..boundary import load_boundary
+
+                b = project.boreholes.dropna(subset=["x", "y"])
+                try:
+                    self.boundary = load_boundary(boundary, near=(b["x"].min(), b["x"].max(),
+                                                                  b["y"].min(), b["y"].max()))
+                    self.boundary_path = boundary
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"Boundary not loaded: {e}")
+            if after:
+                after()
             self._refresh_tree()
             self.viewer.clear()
             self.log(f"Loaded {Path(path).name}: {len(project.ids)} boreholes, "
@@ -295,6 +314,61 @@ class MainWindow(QMainWindow):
 
         self.run(f"Reading {Path(path).name}", load_project, done, path, legend=legend)
 
+    # ------------------------------------------------------------------ project files
+    def settings(self) -> dict:
+        return {"datum": self.p_datum.currentData(), "cell": self.p_cell.value(), "dz": self.p_dz.value(),
+                "smooth": self.p_smooth.value(), "clip_boundary": self.p_clipb.isChecked(),
+                "ve": self.p_ve.value(), "opacity": self.p_opacity.value(), "cutaway": self.p_cut.currentData(),
+                "boreholes": self.p_holes.isChecked(), "labels": self.p_labels.isChecked(),
+                "boundary": self.p_bnd.isChecked(), "specific_yield": self._sy()}
+
+    def apply_settings(self, st: dict):
+        for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
+                  self.p_holes, self.p_labels, self.p_bnd, self.p_clipb):
+            w.blockSignals(True)
+        self.p_datum.setCurrentIndex(max(0, self.p_datum.findData(st.get("datum", "depth"))))
+        self.p_cut.setCurrentIndex(max(0, self.p_cut.findData(st.get("cutaway"))))
+        self.p_cell.setValue(st.get("cell", 0))
+        self.p_dz.setValue(st.get("dz", 0))
+        self.p_smooth.setValue(st.get("smooth", 4))
+        self.p_ve.setValue(st.get("ve", 0))
+        self.p_opacity.setValue(st.get("opacity", 100))
+        self.p_holes.setChecked(st.get("boreholes", True))
+        self.p_labels.setChecked(st.get("labels", True))
+        self.p_bnd.setChecked(st.get("boundary", True))
+        self.p_clipb.setChecked(st.get("clip_boundary", True))
+        for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
+                  self.p_holes, self.p_labels, self.p_bnd, self.p_clipb):
+            w.blockSignals(False)
+        self._pending_sy = st.get("specific_yield", {})
+
+    def save_project(self):
+        if not self.need_project():
+            return
+        from .projectfile import save
+
+        path, _ = QFileDialog.getSaveFileName(self, "Save project", f"{self.project.name}.llproj",
+                                              "LithoLog project (*.llproj)")
+        if path:
+            save(path, self.project.name, self.data_path, self.legend_path, self.boundary_path, self.settings())
+            self.log(f"Project saved: {path}")
+
+    def open_project(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open project", "", "LithoLog project (*.llproj)")
+        if path:
+            self.load_project_file(path)
+
+    def load_project_file(self, path):
+        from .projectfile import load
+
+        try:
+            pf = load(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Open project", str(e))
+            return
+        self.apply_settings(pf["settings"])
+        self.load(pf["data"], legend=pf.get("legend"), name=pf.get("name"), boundary=pf.get("boundary"))
+
     def open_legend(self):
         if not self.need_project():
             return
@@ -303,6 +377,7 @@ class MainWindow(QMainWindow):
             from ..io import load_legend
 
             self.project.legend = load_legend(path, self.project.legend)
+            self.legend_path = path
             self._refresh_tree()
             self.log(f"Legend {Path(path).name} applied.")
             self.redraw()
@@ -319,6 +394,7 @@ class MainWindow(QMainWindow):
         near = (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max())
         try:
             self.boundary = load_boundary(path, near=near)
+            self.boundary_path = path
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "Boundary", str(e))
             return
@@ -414,7 +490,8 @@ class MainWindow(QMainWindow):
                      + (f"; clipped to study area, {100 * (1 - model.coverage):.0f} % beyond borehole cover"
                         if model.coverage is not None else ""))
             self.redraw(reset_view=True)
-            self._fill_volumes()
+            self._fill_volumes(getattr(self, "_pending_sy", None) or None)
+            self._pending_sy = None
             self.docs.setCurrentWidget(self.viewer)
 
         self.run("Building 3D model", build_model, done, self.project, cell, dz,

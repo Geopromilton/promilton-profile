@@ -396,3 +396,21 @@ def test_app_pages_run_on_demo_data():
         at.radio(key="page").set_value(page).run()
         assert not at.exception, (page, [e.message for e in at.exception])
         assert not at.error, (page, [e.value for e in at.error])
+
+
+# --- Studio (desktop) ----------------------------------------------------------------
+
+def test_project_file_roundtrip(tmp_path):
+    from litholog.studio.projectfile import load, save
+
+    data = tmp_path / "data" / "bores.xlsx"
+    data.parent.mkdir()
+    data.write_text("placeholder")
+    p = save(tmp_path / "study.llproj", "Study", data, None, None, {"ve": 25, "specific_yield": {"4": 0.015}})
+    pf = load(p)
+    assert Path(pf["data"]) == data.resolve() and pf["name"] == "Study"
+    assert pf["settings"]["specific_yield"] == {"4": 0.015}
+    assert '"data/bores.xlsx"' in p.read_text()  # stored relative to the project file
+    (tmp_path / "bad.llproj").write_text('{"format": "x"}')
+    with pytest.raises(ValueError):
+        load(tmp_path / "bad.llproj")
