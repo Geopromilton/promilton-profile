@@ -208,3 +208,84 @@ def test_section_and_fence_cli(tmp_path):
     assert main(["fence", str(proj_file), "-o", str(tmp_path / "f.pdf")]) == 0
     assert main(["fence", str(proj_file), "--network", "sections", "-s", str(sec),
                  "-o", str(tmp_path / "g.png")]) == 0
+
+
+# --- Milestone 3: grids, maps, block model ---------------------------------------
+
+def _grid_project(tmp_path):
+    import numpy as np
+
+    rows = ["Name\tX\tY\tZ\tMaterial"]
+    rng = np.random.default_rng(1)
+    for k in range(12):
+        x, y = rng.uniform(0, 2000, 2)
+        g = 100 + x / 100
+        rows += [f"B{k}\t{x:.1f}\t{y:.1f}\t{g:.1f}\t1", f"B{k}\t{x:.1f}\t{y:.1f}\t{g - 3:.1f}\t4",
+                 f"B{k}\t{x:.1f}\t{y:.1f}\t{g - 13:.1f}\t3", f"B{k}\t{x:.1f}\t{y:.1f}\t{g - 40:.1f}\t3"]
+    f = tmp_path / "g.txt"
+    f.write_text("\n".join(rows) + "\n")
+    return load_project(f), f
+
+
+def test_borehole_values(tmp_path):
+    from litholog.grid import borehole_values
+
+    proj, _ = _grid_project(tmp_path)
+    th = borehole_values(proj, "thickness:4")["value"]
+    assert (abs(th - 10) < 1e-6).all()
+    assert (abs(borehole_values(proj, "depth:4")["value"] - 3) < 1e-6).all()
+    assert borehole_values(proj, "top:9")["value"].isna().all()
+    with pytest.raises(ValueError):
+        borehole_values(proj, "thickness")
+
+
+@pytest.mark.parametrize("method", ["idw", "linear", "kriging"])
+def test_interpolators_honour_data(method):
+    import numpy as np
+
+    from litholog.grid import interpolate
+
+    px, py = np.array([0.0, 100, 0, 100]), np.array([0.0, 0, 100, 100])
+    pv = np.array([1.0, 2, 3, 4])
+    z = interpolate(px, py, pv, np.array([0.0, 50, 100]), np.array([0.0, 50, 100]), method)
+    assert abs(z[0, 0] - 1) < 1e-6 and abs(z[2, 2] - 4) < 1e-6
+    assert 1 <= z[1, 1] <= 4
+
+
+def test_isopach_and_block_model_volumes_agree(tmp_path):
+    import numpy as np
+
+    from litholog.grid import grid_attribute, write_ascii_grid
+    from litholog.model3d import build_model, write_vtk
+
+    proj, _ = _grid_project(tmp_path)
+    g, _ = grid_attribute(proj, "thickness:4", cell=50)
+    area = np.isfinite(g.z).sum() * g.cell ** 2
+    assert abs(np.nanmean(g.z) - 10) < 1e-6
+    m = build_model(proj, cell=50, dz=1.0)
+    v = m.volumes({"4": 0.02}).set_index("code")
+    # 10 m layer everywhere: model volume ~ 10 m x model area
+    model_area = (m.lith >= 0).any(0).sum() * m.cell ** 2
+    assert abs(v.loc["4", "volume_m3"] / model_area - 10) < 1.0
+    assert abs(v.loc["4", "storage_m3"] - 0.02 * v.loc["4", "volume_m3"]) < 1
+    assert area > 0
+    # model reproduces a borehole log at the hole
+    bh = proj.borehole("B0")
+    assert m.code_at(bh.x, bh.y, bh.elevation - 8) == "4"
+    assert m.code_at(bh.x, bh.y, bh.elevation - 30) == "3"
+    asc = write_ascii_grid(g, tmp_path / "t.asc").read_text().splitlines()
+    assert asc[0].startswith("ncols") and len(asc) == 6 + len(g.y)
+    vtk = write_vtk(m, tmp_path / "m.vtk").read_text()
+    assert "STRUCTURED_POINTS" in vtk and f"DIMENSIONS {len(m.x)} {len(m.y)} {len(m.z)}" in vtk
+
+
+def test_map_and_model_cli(tmp_path):
+    _, f = _grid_project(tmp_path)
+    assert main(["map", str(f), "-a", "ground", "thickness:4", "top:3", "-m", "kriging",
+                 "-o", str(tmp_path / "maps"), "-f", "png"]) == 0
+    assert (tmp_path / "maps" / "thickness_4.png").exists()
+    assert (tmp_path / "maps" / "thickness_4.asc").exists()
+    assert main(["model", str(f), "--cell", "100", "--sy", "4=0.02", "--only", "4",
+                 "-o", str(tmp_path / "model"), "-f", "png"]) == 0
+    for name in ("block_model.png", "block_model_4.png", "slices.png", "volumes.csv", "model.vtk"):
+        assert (tmp_path / "model" / name).exists()

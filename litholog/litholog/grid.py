@@ -1,0 +1,245 @@
+"""Per-borehole attributes and 2D gridding (IDW, linear, ordinary kriging).
+
+Attributes are given as short strings:
+
+    ground            collar (ground) elevation
+    top:CODE          elevation of the first occurrence of CODE
+    base:CODE         elevation of the last base of CODE
+    depth:CODE        depth (m bgl) to the first occurrence of CODE
+    thickness:CODE    total thickness of CODE in the hole (0 where absent)
+    water             water-table elevation (latest measurement)
+    dtw               depth to water (m bgl, latest measurement)
+    total_depth       drilled depth
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .correlate import units
+from .project import Project
+
+
+def attribute_label(attr: str, legend=None) -> tuple[str, str]:
+    """(title, unit) for an attribute string."""
+    kind, _, code = attr.partition(":")
+    name = legend.get(code).name if (legend is not None and code) else code
+    return {
+        "ground": ("Ground elevation", "m amsl"),
+        "top": (f"Top of {name}", "m amsl"),
+        "base": (f"Base of {name}", "m amsl"),
+        "depth": (f"Depth to {name}", "m bgl"),
+        "thickness": (f"Thickness of {name}", "m"),
+        "water": ("Water-table elevation", "m amsl"),
+        "dtw": ("Depth to water", "m bgl"),
+        "total_depth": ("Drilled depth", "m"),
+    }.get(kind, (attr, ""))
+
+
+def borehole_values(project: Project, attr: str) -> pd.DataFrame:
+    """Table borehole_id, x, y, value for one attribute (NaN where undefined)."""
+    kind, _, code = attr.partition(":")
+    code = code.strip().upper() if code else ""
+    if kind in ("top", "base", "depth", "thickness") and not code:
+        raise ValueError(f"'{attr}': give a lithology code, e.g. {kind}:GRA")
+    if kind not in ("ground", "top", "base", "depth", "thickness", "water", "dtw", "total_depth"):
+        raise ValueError(f"Unknown attribute '{attr}'")
+    rows = []
+    for bh in project:
+        v = np.nan
+        us = units(bh)
+        hit = [u for u in us if u.code.upper() == code]
+        ground = us[0].top if us else (bh.elevation if bh.has_elevation else np.nan)
+        wl = bh.water_levels.dropna(subset=["depth"])
+        if kind == "ground":
+            v = bh.elevation
+        elif kind == "top" and hit:
+            v = hit[0].top
+        elif kind == "base" and hit:
+            v = hit[-1].bot
+        elif kind == "depth" and hit:
+            v = ground - hit[0].top
+        elif kind == "thickness" and us:
+            v = sum(u.thick for u in hit)
+        elif kind == "water" and len(wl) and bh.has_elevation:
+            v = bh.elevation - wl.iloc[-1]["depth"]
+        elif kind == "dtw" and len(wl):
+            v = wl.iloc[-1]["depth"]
+        elif kind == "total_depth":
+            v = bh.depth
+        rows.append({"borehole_id": bh.id, "x": bh.x, "y": bh.y, "value": v})
+    return pd.DataFrame(rows)
+
+
+@dataclass
+class Grid:
+    x: np.ndarray       # cell-centre x (nx,)
+    y: np.ndarray       # cell-centre y (ny,)
+    z: np.ndarray       # values (ny, nx); NaN = masked
+    cell: float
+
+    @property
+    def extent(self):
+        h = self.cell / 2
+        return (self.x[0] - h, self.x[-1] + h, self.y[0] - h, self.y[-1] + h)
+
+    def mesh(self):
+        return np.meshgrid(self.x, self.y)
+
+
+def make_axes(xs, ys, cell: float | None = None, margin: float = 0.05, target: int = 150):
+    xs, ys = np.asarray(xs, float), np.asarray(ys, float)
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    span = max(x1 - x0, y1 - y0) or 100.0
+    pad = span * margin
+    x0, x1, y0, y1 = x0 - pad, x1 + pad, y0 - pad, y1 + pad
+    if not cell:
+        raw = span * (1 + 2 * margin) / target
+        mag = 10 ** np.floor(np.log10(raw))
+        cell = float(min((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)))
+    gx = np.arange(np.floor(x0 / cell) * cell + cell / 2, x1 + cell, cell)
+    gy = np.arange(np.floor(y0 / cell) * cell + cell / 2, y1 + cell, cell)
+    return gx, gy, cell
+
+
+def hull_mask(px, py, gx, gy, buffer: float = 0.0):
+    """True inside the convex hull of the points, or within ``buffer`` m of its edge."""
+    from matplotlib.path import Path as MplPath
+    from scipy.spatial import ConvexHull
+
+    X, Y = np.meshgrid(gx, gy)
+    q = np.column_stack([X.ravel(), Y.ravel()])
+    pts = np.column_stack([px, py]).astype(float)
+    hull = pts[ConvexHull(pts).vertices]
+    inside = MplPath(hull).contains_points(q)
+    if buffer > 0:
+        a, b = hull, np.roll(hull, -1, axis=0)
+        d = b - a
+        L2 = np.maximum((d ** 2).sum(1), 1e-12)
+        t = np.clip(((q[:, None, :] - a[None]) * d[None]).sum(2) / L2[None], 0, 1)
+        nearest = a[None] + t[..., None] * d[None]
+        dist = np.hypot(*(q[:, None, :] - nearest).transpose(2, 0, 1)).min(1)
+        inside |= dist <= buffer
+    return inside.reshape(X.shape)
+
+
+def interpolate(px, py, pv, gx, gy, method: str = "idw", power: float = 2.0):
+    px, py, pv = (np.asarray(a, float) for a in (px, py, pv))
+    X, Y = np.meshgrid(gx, gy)
+    tx, ty = X.ravel(), Y.ravel()
+    if len(pv) == 1:
+        return np.full(X.shape, pv[0])
+    if method == "idw":
+        d = np.hypot(tx[:, None] - px[None, :], ty[:, None] - py[None, :])
+        exact = d < 1e-9
+        w = 1.0 / np.maximum(d, 1e-9) ** power
+        out = (w @ pv) / w.sum(1)
+        hit = exact.any(1)
+        out[hit] = pv[exact[hit].argmax(1)]
+    elif method == "linear":
+        from scipy.interpolate import griddata
+
+        out = griddata((px, py), pv, (tx, ty), method="linear")
+        near = griddata((px, py), pv, (tx, ty), method="nearest")
+        out = np.where(np.isnan(out), near, out)
+    elif method == "kriging":
+        out = _ordinary_kriging(px, py, pv, tx, ty)
+    else:
+        raise ValueError(f"Unknown gridding method '{method}' (idw, linear, kriging)")
+    return out.reshape(X.shape)
+
+
+def _spherical(h, nugget, sill, rng):
+    h = np.asarray(h, float)
+    g = np.where(h < rng, nugget + (sill - nugget) * (1.5 * h / rng - 0.5 * (h / rng) ** 3), sill)
+    return np.where(h == 0, 0.0, g)
+
+
+def fit_variogram(px, py, pv, n_lags: int = 12):
+    """Fit a spherical variogram (nugget, sill, range) to the experimental one."""
+    from scipy.optimize import curve_fit
+
+    d = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
+    g = 0.5 * (pv[:, None] - pv[None, :]) ** 2
+    iu = np.triu_indices(len(pv), 1)
+    d, g = d[iu], g[iu]
+    var = float(np.var(pv)) or 1.0
+    maxd = d.max() / 2 if len(d) else 1.0
+    edges = np.linspace(0, maxd, n_lags + 1)
+    lag, gam = [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        sel = (d > a) & (d <= b)
+        if sel.sum() >= 3:
+            lag.append(d[sel].mean())
+            gam.append(g[sel].mean())
+    if len(lag) < 3:
+        return 0.0, var, maxd
+    try:
+        (n, s, r), _ = curve_fit(_spherical, lag, gam, p0=[0.1 * var, var, maxd / 2],
+                                 bounds=([0, 1e-9, maxd / 50], [var * 2, var * 4, maxd * 4]))
+        return float(n), float(s), float(r)
+    except Exception:  # noqa: BLE001 - fall back to a sensible default model
+        return 0.0, var, maxd / 2
+
+
+def _ordinary_kriging(px, py, pv, tx, ty):
+    n = len(pv)
+    nug, sill, rng = fit_variogram(px, py, pv)
+    d = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
+    K = np.ones((n + 1, n + 1))
+    K[:n, :n] = _spherical(d, nug, sill, rng)
+    K[n, n] = 0.0
+    out = np.empty(len(tx))
+    for s in range(0, len(tx), 20000):  # chunk to bound memory
+        dt = np.hypot(px[:, None] - tx[None, s:s + 20000], py[:, None] - ty[None, s:s + 20000])
+        rhs = np.vstack([_spherical(dt, nug, sill, rng), np.ones((1, dt.shape[1]))])
+        w = np.linalg.lstsq(K, rhs, rcond=None)[0]
+        out[s:s + 20000] = w[:n].T @ pv
+    return out
+
+
+def grid_attribute(project: Project, attr: str, method: str = "idw", cell: float | None = None,
+                   mask: str = "hull", buffer: float = 0.0):
+    """Grid one attribute. Returns (Grid, borehole value table)."""
+    vals = borehole_values(project, attr)
+    allxy = project.boreholes.dropna(subset=["x", "y"])
+    good = vals.dropna(subset=["x", "y", "value"])
+    if len(good) < 2:
+        raise ValueError(f"'{attr}': fewer than two boreholes have a value")
+    gx, gy, cell = make_axes(allxy["x"], allxy["y"], cell)
+    z = interpolate(good["x"], good["y"], good["value"], gx, gy, method)
+    if mask == "hull" and len(good) >= 3 and not _nearly_collinear(good["x"], good["y"]):
+        # A two-cell margin keeps contours smooth up to the hull; maps clip to the exact hull.
+        z = np.where(hull_mask(good["x"], good["y"], gx, gy, buffer or 2 * cell), z, np.nan)
+    return Grid(gx, gy, z, cell), vals
+
+
+def _nearly_collinear(px, py) -> bool:
+    """True when the points' hull is a thin sliver (hull area < 10 % of its bounding box)."""
+    from scipy.spatial import ConvexHull
+
+    pts = np.column_stack([px, py]).astype(float)
+    try:
+        area = ConvexHull(pts).volume
+    except Exception:  # noqa: BLE001 - exactly collinear points
+        return True
+    span = np.ptp(pts, axis=0)
+    return area < 0.1 * max(span[0] * span[1], 1e-9)
+
+
+def write_ascii_grid(grid: Grid, path, nodata: float = -9999.0) -> Path:
+    """ESRI ASCII grid (.asc): opens in QGIS, ArcGIS, Surfer, GRASS."""
+    path = Path(path)
+    x0, _, y0, _ = grid.extent
+    data = np.where(np.isnan(grid.z), nodata, grid.z)[::-1]  # north row first
+    with open(path, "w") as f:
+        f.write(f"ncols {len(grid.x)}\nnrows {len(grid.y)}\n")
+        f.write(f"xllcorner {x0:.3f}\nyllcorner {y0:.3f}\ncellsize {grid.cell:g}\n")
+        f.write(f"NODATA_value {nodata:g}\n")
+        for row in data:
+            f.write(" ".join(f"{v:.3f}" for v in row) + "\n")
+    return path

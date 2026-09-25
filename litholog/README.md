@@ -3,7 +3,8 @@
 **Free, open-source borehole logging for geologists, hydrogeologists and geotechnical engineers.**
 
 Fill in one Excel sheet (or point it at a GMS borehole file) → get publication-quality
-borehole strip logs, geological cross-sections and 3D fence diagrams as PDF, PNG or SVG.
+borehole strip logs, cross-sections, 3D fence diagrams, contour maps and a 3D lithology block
+model with volumes and groundwater-storage estimates — as PDF, PNG or SVG.
 
 ![Example strip log](docs/BW-01.png)
 
@@ -84,6 +85,48 @@ litholog fence data.xlsx --views 4 -o fence.pdf       # four views around the mo
 
 ![Fence diagram](docs/fence_demo.png)
 
+## Contour maps
+
+```bash
+litholog map data.xlsx -a ground top:KHON thickness:FRAC water -m kriging
+```
+
+| Attribute | Map |
+|---|---|
+| `ground` | ground (collar) elevation |
+| `top:CODE`, `base:CODE` | elevation of the top / base of a unit |
+| `depth:CODE` | depth below ground to a unit |
+| `thickness:CODE` | total thickness of a unit (isopach), with its volume |
+| `water`, `dtw` | water-table elevation (with flow arrows) and depth to water |
+
+Gridding by inverse distance (`idw`, default), `linear` (TIN) or ordinary `kriging` with an
+automatically fitted spherical variogram. Maps are limited to the area enclosed by the boreholes
+(`--no-mask` for the full rectangle). Each map is also saved as an ESRI ASCII grid (`.asc`) that
+opens in QGIS, ArcGIS or Surfer, plus a CSV of the borehole values.
+
+![Water-table map](docs/map_demo.png)
+
+## 3D block model, volumes and groundwater storage
+
+```bash
+litholog model data.xlsx --sy FRAC=0.015 --only FRAC
+```
+
+Builds a voxel model in which each voxel takes the lithology favoured by an inverse-distance vote of
+the boreholes, bounded by the ground surface, the base of drilling and the boreholes' outline.
+
+* `--datum depth` (default) compares holes at equal depth below ground, so layers follow the land
+  surface — suited to weathered / fractured hard-rock aquifers. `--datum elevation` compares them
+  at equal elevation — suited to flat-lying sediments.
+* Volumes are summed from the vote *proportions*, not only the winning lithology, so thin units
+  are not under-counted; they agree with the isopach (thickness-map) volume.
+* `--sy CODE=value` adds groundwater storage = volume × specific yield (your estimate) per unit.
+
+Outputs: cut-away 3D view with a legend/volume table, views of selected units (`--only`),
+horizontal slices, `volumes.csv`, and `model.vtk` for ParaView.
+
+![Block model](docs/model_demo.png)
+
 ## Commands
 
 ```
@@ -92,6 +135,8 @@ litholog validate DATA                       check for overlaps, gaps, bad depth
 litholog striplog DATA [-o DIR] [-f pdf|png|svg] [-b BH1 BH2] [-m 50] [--title NAME]
 litholog section DATA (-b IDS | --line X,Y ... | -s FILE) [--ve N] [--page A3|A4]
 litholog fence DATA [--network mst|delaunay|sections] [--views N] [-o fence.pdf]
+litholog map DATA -a ATTR ... [-m idw|linear|kriging] [--cell M]
+litholog model DATA [--datum depth|elevation] [--sy CODE=SY ...] [--only CODE ...]
 litholog convert DATA [OUT.xlsx] [-l LEGEND] turn GMS text / CSV folder into a workbook
 litholog legend [DATA] [-o legend.pdf]       list / draw the lithology legend
 
@@ -126,7 +171,7 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 
 - [x] **M1** Borehole database (Excel/CSV/GMS), validation, strip logs, custom legends
 - [x] **M2** Cross-sections (hole-to-hole or along any line), 3D fence diagrams
-- [ ] **M3** Layer-surface models, isopach and water-table maps, 3D lithology block models, volumes
+- [x] **M3** Contour maps (surfaces, isopachs, water table), 3D block model, volumes, storage
 - [ ] **M4** Browser app (no install), 3D viewer, report export, KMZ/VTK/DXF export
 
 ## Development

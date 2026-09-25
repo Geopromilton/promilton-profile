@@ -16,11 +16,11 @@ rng = np.random.default_rng(7)
 boreholes = pd.DataFrame([
     # id, easting, northing, elevation, td, location, date, method, diameter
     ("BW-01", 651200, 1688450, 486.2, 90, "Granite upland", "2025-02-11", "DTH", 165),
-    ("BW-02", 651640, 1688120, 481.7, 80, "Granite upland", "2025-02-14", "DTH", 165),
-    ("BW-03", 652010, 1687760, 476.9, 100, "Valley fill", "2025-02-18", "DTH", 165),
-    ("BW-04", 652480, 1687430, 472.3, 75, "Gneiss / dyke", "2025-02-21", "DTH", 165),
-    ("BW-05", 652900, 1687010, 468.8, 120, "Schist belt margin", "2025-02-25", "DTH", 165),
-    ("TW-06", 653420, 1686540, 459.4, 30, "River alluvium", "2025-03-03", "Rotary", 300),
+    ("BW-02", 652150, 1688600, 481.7, 80, "Granite upland", "2025-02-14", "DTH", 165),
+    ("BW-03", 651700, 1687800, 476.9, 100, "Valley fill", "2025-02-18", "DTH", 165),
+    ("BW-04", 652650, 1687550, 472.3, 75, "Gneiss / dyke", "2025-02-21", "DTH", 165),
+    ("BW-05", 651250, 1687050, 468.8, 120, "Schist belt margin", "2025-02-25", "DTH", 165),
+    ("TW-06", 652450, 1686750, 459.4, 30, "River alluvium", "2025-03-03", "Rotary", 300),
 ], columns=["Borehole ID", "Easting (m)", "Northing (m)", "Elevation (m amsl)", "Total depth (m)",
             "Location", "Date", "Drilling method", "Diameter"])
 

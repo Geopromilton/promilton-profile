@@ -69,13 +69,44 @@ def main(argv=None) -> int:
     fe.add_argument("--title", help="project name")
     fe.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
 
+    mp = sub.add_parser("map", help="contour maps: ground, top/base/depth/thickness of a unit, water table")
+    mp.add_argument("data")
+    mp.add_argument("-a", "--attributes", nargs="+", required=True, metavar="ATTR",
+                    help="ground, top:CODE, base:CODE, depth:CODE, thickness:CODE, water, dtw, total_depth")
+    mp.add_argument("-m", "--method", default="idw", choices=["idw", "linear", "kriging"])
+    mp.add_argument("--cell", type=float, help="grid cell size in m (default: ~150 cells across)")
+    mp.add_argument("--no-mask", action="store_true", help="grid the full rectangle, not just the borehole area")
+    mp.add_argument("-o", "--out", default="maps", help="output folder (default: maps)")
+    mp.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
+    mp.add_argument("--page", default="A3", choices=["A3", "A4"])
+    mp.add_argument("--title", help="project name")
+    mp.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
+
+    md = sub.add_parser("model", help="3D lithology block model, volumes and groundwater storage")
+    md.add_argument("data")
+    md.add_argument("--cell", type=float, help="horizontal voxel size (m)")
+    md.add_argument("--dz", type=float, help="vertical voxel size (m)")
+    md.add_argument("--datum", default="depth", choices=["depth", "elevation"],
+                    help="correlate at equal depth below ground (default; weathered/fractured "
+                         "hard-rock aquifers) or equal elevation (flat-lying sediments)")
+    md.add_argument("--only", nargs="+", metavar="CODE", help="also draw these units on their own")
+    md.add_argument("--sy", nargs="+", metavar="CODE=SY", help="specific yield per unit, e.g. 4=0.015")
+    md.add_argument("--ve", type=float, help="vertical exaggeration")
+    md.add_argument("--azim", type=float, default=-60)
+    md.add_argument("--elev", type=float, default=30)
+    md.add_argument("-o", "--out", default="model", help="output folder (default: model)")
+    md.add_argument("-f", "--format", default="pdf", choices=["pdf", "png", "svg"])
+    md.add_argument("--title", help="project name")
+    md.add_argument("-l", "--legend", help="legend file (CSV/Excel)")
+
     lg = sub.add_parser("legend", help="print the lithology codes, or draw them to a file")
     lg.add_argument("data", nargs="?", help="workbook with a custom Legend sheet (optional)")
     lg.add_argument("-o", "--out", help="save a legend chart (pdf/png/svg)")
 
     a = p.parse_args(argv)
     return {"template": _template, "validate": _validate, "striplog": _striplog,
-            "legend": _legend, "convert": _convert, "section": _section, "fence": _fence}[a.cmd](a)
+            "legend": _legend, "convert": _convert, "section": _section, "fence": _fence,
+            "map": _map, "model": _model}[a.cmd](a)
 
 
 def _template(a):
@@ -244,6 +275,61 @@ def _fence(a):
                        title=a.title or project.name, datum=a.datum)
     for f in files:
         print(f"  {f}  ({len(edges)} panels)")
+    return 0
+
+
+def _map(a):
+    from .grid import attribute_label, grid_attribute, write_ascii_grid
+    from .io import load_project
+    from .maps import save_map
+
+    project = load_project(a.data, legend=a.legend)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    for attr in a.attributes:
+        grid, vals = grid_attribute(project, attr, a.method, a.cell, mask="none" if a.no_mask else "hull")
+        stem = out / _safe(attr.replace(":", "_"))
+        save_map(grid, vals, attr, stem.with_suffix(f".{a.format}"), legend=project.legend, method=a.method,
+                 title=a.title or project.name, page=a.page, all_xy=project.boreholes)
+        write_ascii_grid(grid, stem.with_suffix(".asc"))
+        vals.to_csv(stem.with_name(stem.name + "_values.csv"), index=False)
+        name, unit = attribute_label(attr, project.legend)
+        extra = ""
+        if attr.startswith("thickness"):
+            extra = f", isopach volume {float(__import__('numpy').nansum(grid.z)) * grid.cell ** 2 / 1e6:,.1f} MCM"
+        print(f"  {stem.with_suffix('.' + a.format)}  ({name}, {vals['value'].notna().sum()} holes{extra})")
+    print(f"  grids (.asc, open in QGIS/ArcGIS/Surfer) and values (.csv) in {out}")
+    return 0
+
+
+def _model(a):
+    from .io import load_project
+    from .model3d import build_model, model_view, slices_figure, write_vtk
+
+    project = load_project(a.data, legend=a.legend)
+    sy = {}
+    for item in a.sy or []:
+        code, _, val = item.partition("=")
+        sy[code.strip().upper()] = float(val)
+    model = build_model(project, a.cell, a.dz, datum=a.datum)
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    kw = dict(title=a.title or project.name, sy=sy, ve=a.ve, azim=a.azim, elev=a.elev)
+    files = [model_view(model, project.legend, out / f"block_model.{a.format}", **kw)]
+    for code in a.only or []:
+        files.append(model_view(model, project.legend, out / f"block_model_{_safe(code)}.{a.format}",
+                                only=[code.upper()], **kw))
+    files.append(slices_figure(model, project.legend, out / f"slices.{a.format}", title=kw["title"]))
+    vols = model.volumes(sy)
+    vols.insert(1, "name", [project.legend.get(c).name for c in vols["code"]])
+    vols.to_csv(out / "volumes.csv", index=False)
+    files += [out / "volumes.csv", write_vtk(model, out / "model.vtk")]
+    nz, ny, nx = model.lith.shape
+    print(f"Model {nx} x {ny} x {nz} voxels ({model.cell:g} x {model.cell:g} x {model.dz:g} m), datum: {a.datum}")
+    cols = ["code", "name", "volume_mcm", "percent"] + (["specific_yield", "storage_mcm"] if sy else [])
+    print(vols[cols].round({"volume_mcm": 1, "percent": 1, "storage_mcm": 2}).to_string(index=False))
+    for f in files:
+        print(f"  {f}")
     return 0
 
 
