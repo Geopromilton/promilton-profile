@@ -24,6 +24,7 @@ import pandas as pd
 from .correlate import units
 
 METHODS = {
+    "horizons_custom": "Horizons · your settings",
     "horizons_idw": "Horizons · IDW",
     "horizons_kriging": "Horizons · kriging",
     "voxel": "Voxel · indicator IDW",
@@ -72,10 +73,14 @@ def _voxel_log(others, x, y, dz=0.5, power=2.0):
     return out
 
 
-def predict(project, bid, method):
+def predict(project, bid, method, interp=None, constraints=None):
     bh = project.borehole(bid)
     x, y = float(bh.x), float(bh.y)
     rest = _subset(project, bid)
+    if method == "horizons_custom":
+        from .horizons import predict_log
+
+        return predict_log(rest, x, y, interp or "idw", constraints=constraints)
     if method.startswith("horizons"):
         from .horizons import predict_log
 
@@ -130,7 +135,8 @@ def score(actual, pred, codes, dz=0.25):
     return row, per
 
 
-def cross_validate(project, methods=("horizons_idw", "horizons_kriging", "voxel", "nearest"), progress=None):
+def cross_validate(project, methods=("horizons_idw", "horizons_kriging", "voxel", "nearest"), progress=None,
+                   interp=None, constraints=None):
     """Leave-one-out cross-validation. Returns (per_hole, per_unit) tables."""
     holes = [bh for bh in project if pd.notna(bh.x) and pd.notna(bh.y) and _log(bh)]
     if len(holes) < 4:
@@ -147,7 +153,7 @@ def cross_validate(project, methods=("horizons_idw", "horizons_kriging", "voxel"
             if progress:
                 progress(i * len(methods) + j, n)
             try:
-                pred = predict(project, bh.id, m)
+                pred = predict(project, bh.id, m, interp, constraints)
             except Exception:  # noqa: BLE001 - a failed prediction scores as a miss
                 pred = []
             r, per = score(actual, pred, codes)
@@ -178,14 +184,18 @@ def summarise(per_hole, per_unit, legend=None):
 
 
 # ---------------------------------------------------------------------------- uncertainty
-def volumes_by_method(project, boundary=None, sy=None):
+def volumes_by_method(project, boundary=None, sy=None, interp=None, constraints=None):
     from .horizons import build_horizon_model
     from .model3d import build_model
 
     vols = {}
-    for m, fn in (("horizons_idw", lambda: build_horizon_model(project, method="idw", boundary=boundary)),
+    runs = []
+    if interp is not None or constraints is not None:
+        runs.append(("horizons_custom", lambda: build_horizon_model(project, method=interp or "idw", boundary=boundary,
+                                                                    constraints=constraints)))
+    for m, fn in runs + [("horizons_idw", lambda: build_horizon_model(project, method="idw", boundary=boundary)),
                   ("horizons_kriging", lambda: build_horizon_model(project, method="kriging", boundary=boundary)),
-                  ("voxel", lambda: build_model(project, boundary=boundary))):
+                  ("voxel", lambda: build_model(project, boundary=boundary))]:
         v = fn().volumes(sy or {})
         vols[m] = dict(zip(v["code"], v["volume_mcm"]))
     df = pd.DataFrame(vols)
@@ -235,7 +245,9 @@ def report_figure(per_hole, summary, per_unit, dist, legend, title="", target=No
                           "from the others", fontsize=10, color="#444444")
     ms = list(summary["method"])
     labels = [METHODS.get(m, m) for m in ms]
-    colors = ["#2E6F9E", "#5FA8D3", "#E0A458", "#9AA3AF"][:len(ms)]
+    palette = {"horizons_custom": "#C0392B", "horizons_idw": "#2E6F9E", "horizons_kriging": "#5FA8D3",
+               "voxel": "#E0A458", "nearest": "#9AA3AF"}
+    colors = [palette.get(m, "#777777") for m in ms]
 
     ax = fig.add_axes([0.13, 0.56, 0.2, 0.3])
     ax.barh(labels[::-1], summary["match_mean"][::-1], color=colors[::-1])
@@ -324,13 +336,15 @@ def report_figure(per_hole, summary, per_unit, dist, legend, title="", target=No
 
 
 def validation_report(project, out, methods=None, boundary=None, target=None, title="", volumes=True,
-                      progress=None):
+                      progress=None, interp=None, constraints=None):
     """Run the cross-validation and write tables, a one-page PDF/PNG and a text summary to ``out``."""
     import matplotlib.pyplot as plt
 
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    per_hole, per_unit = cross_validate(project, methods or tuple(METHODS), progress)
+    if methods is None:
+        methods = tuple(m for m in METHODS if m != "horizons_custom" or interp is not None or constraints is not None)
+    per_hole, per_unit = cross_validate(project, methods, progress, interp, constraints)
     summary, units_tab = summarise(per_hole, per_unit, project.legend)
     dist = distance_grid(project, boundary)
     per_hole.to_csv(out / "crossval_per_borehole.csv", index=False)
@@ -340,7 +354,7 @@ def validation_report(project, out, methods=None, boundary=None, target=None, ti
     files = [out / f for f in ("crossval_summary.csv", "crossval_per_unit.csv", "crossval_per_borehole.csv")]
     vol = None
     if volumes:
-        vol = volumes_by_method(project, boundary)
+        vol = volumes_by_method(project, boundary, interp=interp, constraints=constraints)
         vol.insert(1, "unit", [project.legend.get(c).name for c in vol["code"]])
         vol.to_csv(out / "volumes_by_method.csv", index=False)
         files.append(out / "volumes_by_method.csv")

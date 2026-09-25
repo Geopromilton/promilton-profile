@@ -135,30 +135,98 @@ def hull_mask(px, py, gx, gy, buffer: float = 0.0):
     return inside.reshape(X.shape)
 
 
-def interpolate(px, py, pv, gx, gy, method: str = "idw", power: float = 2.0):
+@dataclass
+class Interp:
+    """How strongly, and how far, each borehole influences an interpolated surface (as in GMS).
+
+    method: "idw", "kriging", "linear" (TIN) or "smooth" (Clough-Tocher smooth TIN).
+    power: IDW exponent - higher keeps each borehole's influence local, lower spreads it.
+    neighbours: use only the N nearest boreholes for each point (None = all).
+    radius: search radius (m); boreholes farther away have no influence (the nearest one is
+        used where none is within the radius).
+    variogram: "spherical", "exponential" or "gaussian"; range/sill/nugget None = fitted to the data.
+    """
+
+    method: str = "idw"
+    power: float = 2.0
+    neighbours: int | None = None
+    radius: float | None = None
+    variogram: str = "spherical"
+    range: float | None = None
+    sill: float | None = None
+    nugget: float | None = None
+
+    def label(self) -> str:
+        m = {"idw": f"IDW (power {self.power:g})", "kriging": f"kriging ({self.variogram})",
+             "linear": "linear TIN", "smooth": "smooth TIN"}.get(self.method, self.method)
+        extra = []
+        if self.neighbours:
+            extra.append(f"{self.neighbours} nearest")
+        if self.radius:
+            extra.append(f"radius {self.radius:g} m")
+        if self.method == "kriging" and self.range:
+            extra.append(f"range {self.range:g} m")
+        return m + (f", {', '.join(extra)}" if extra else "")
+
+
+def as_interp(method, power: float = 2.0) -> Interp:
+    return method if isinstance(method, Interp) else Interp(str(method), power)
+
+
+def interpolate(px, py, pv, gx, gy, method="idw", power: float = 2.0):
+    """Interpolate point values onto the grid gx × gy. ``method`` is a name or an ``Interp``."""
+    o = as_interp(method, power)
     px, py, pv = (np.asarray(a, float) for a in (px, py, pv))
     X, Y = np.meshgrid(gx, gy)
     tx, ty = X.ravel(), Y.ravel()
     if len(pv) == 1:
         return np.full(X.shape, pv[0])
-    if method == "idw":
+    if o.method == "idw":
+        out = _idw(px, py, pv, tx, ty, o)
+    elif o.method in ("linear", "smooth"):
+        from scipy.interpolate import griddata
+
+        out = griddata((px, py), pv, (tx, ty), method="linear" if o.method == "linear" else "cubic")
+        near = griddata((px, py), pv, (tx, ty), method="nearest")
+        out = np.where(np.isnan(out), near, out)
+    elif o.method == "kriging":
+        out = _ordinary_kriging(px, py, pv, tx, ty, o)
+    else:
+        raise ValueError(f"Unknown gridding method '{o.method}' (idw, kriging, linear, smooth)")
+    return out.reshape(X.shape)
+
+
+def _neighbourhood(px, py, tx, ty, o, k_default=None):
+    """Indices and distances of the boreholes that influence each target point."""
+    from scipy.spatial import cKDTree
+
+    n = len(px)
+    k = min(o.neighbours or k_default or n, n)
+    tree = cKDTree(np.column_stack([px, py]))
+    d, i = tree.query(np.column_stack([tx, ty]), k=k)
+    d, i = np.atleast_2d(d.T).T if k == 1 else d, np.atleast_2d(i.T).T if k == 1 else i
+    if o.radius:
+        far = d > o.radius
+        far[:, 0] = False            # always keep the nearest borehole
+        d = np.where(far, np.inf, d)
+    return d, i
+
+
+def _idw(px, py, pv, tx, ty, o):
+    if not o.neighbours and not o.radius:
         d = np.hypot(tx[:, None] - px[None, :], ty[:, None] - py[None, :])
         exact = d < 1e-9
-        w = 1.0 / np.maximum(d, 1e-9) ** power
+        w = 1.0 / np.maximum(d, 1e-9) ** o.power
         out = (w @ pv) / w.sum(1)
         hit = exact.any(1)
         out[hit] = pv[exact[hit].argmax(1)]
-    elif method == "linear":
-        from scipy.interpolate import griddata
-
-        out = griddata((px, py), pv, (tx, ty), method="linear")
-        near = griddata((px, py), pv, (tx, ty), method="nearest")
-        out = np.where(np.isnan(out), near, out)
-    elif method == "kriging":
-        out = _ordinary_kriging(px, py, pv, tx, ty)
-    else:
-        raise ValueError(f"Unknown gridding method '{method}' (idw, linear, kriging)")
-    return out.reshape(X.shape)
+        return out
+    d, i = _neighbourhood(px, py, tx, ty, o)
+    w = np.where(np.isfinite(d), 1.0 / np.maximum(d, 1e-9) ** o.power, 0.0)
+    out = (w * pv[i]).sum(1) / w.sum(1)
+    exact = d[:, 0] < 1e-9
+    out[exact] = pv[i[exact, 0]]
+    return out
 
 
 def _spherical(h, nugget, sill, rng):
@@ -167,8 +235,40 @@ def _spherical(h, nugget, sill, rng):
     return np.where(h == 0, 0.0, g)
 
 
-def fit_variogram(px, py, pv, n_lags: int = 12):
-    """Fit a spherical variogram (nugget, sill, range) to the experimental one."""
+def _exponential(h, nugget, sill, rng):   # practical range: 95 % of the sill at h = range
+    h = np.asarray(h, float)
+    return np.where(h == 0, 0.0, nugget + (sill - nugget) * (1 - np.exp(-3 * h / rng)))
+
+
+def _gaussian(h, nugget, sill, rng):
+    h = np.asarray(h, float)
+    return np.where(h == 0, 0.0, nugget + (sill - nugget) * (1 - np.exp(-3 * (h / rng) ** 2)))
+
+
+VARIOGRAMS = {"spherical": _spherical, "exponential": _exponential, "gaussian": _gaussian}
+
+
+def experimental_variogram(px, py, pv, n_lags: int = 12):
+    """(lag distance, semivariance, pair count) of the data, up to half the largest separation."""
+    px, py, pv = (np.asarray(a, float) for a in (px, py, pv))
+    d = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
+    g = 0.5 * (pv[:, None] - pv[None, :]) ** 2
+    iu = np.triu_indices(len(pv), 1)
+    d, g = d[iu], g[iu]
+    maxd = d.max() / 2 if len(d) else 1.0
+    edges = np.linspace(0, maxd, n_lags + 1)
+    lag, gam, cnt = [], [], []
+    for a, b in zip(edges[:-1], edges[1:]):
+        sel = (d > a) & (d <= b)
+        if sel.sum() >= 3:
+            lag.append(d[sel].mean())
+            gam.append(g[sel].mean())
+            cnt.append(int(sel.sum()))
+    return np.array(lag), np.array(gam), np.array(cnt)
+
+
+def fit_variogram(px, py, pv, n_lags: int = 12, model: str = "spherical"):
+    """Fit a variogram model (nugget, sill, range) to the experimental one."""
     from scipy.optimize import curve_fit
 
     d = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
@@ -187,24 +287,62 @@ def fit_variogram(px, py, pv, n_lags: int = 12):
     if len(lag) < 3:
         return 0.0, var, maxd
     try:
-        (n, s, r), _ = curve_fit(_spherical, lag, gam, p0=[0.1 * var, var, maxd / 2],
+        (n, s, r), _ = curve_fit(VARIOGRAMS[model], lag, gam, p0=[0.1 * var, var, maxd / 2],
                                  bounds=([0, 1e-9, maxd / 50], [var * 2, var * 4, maxd * 4]))
         return float(n), float(s), float(r)
     except Exception:  # noqa: BLE001 - fall back to a sensible default model
         return 0.0, var, maxd / 2
 
 
-def _ordinary_kriging(px, py, pv, tx, ty):
+def variogram_params(px, py, pv, o=None):
+    """(model function, nugget, sill, range): the user's values where given, fitted otherwise."""
+    o = o or Interp("kriging")
+    f = VARIOGRAMS.get(o.variogram, _spherical)
+    nug, sill, rng = fit_variogram(px, py, pv, model=o.variogram if o.variogram in VARIOGRAMS else "spherical")
+    return (f, nug if o.nugget is None else o.nugget, sill if o.sill is None else o.sill,
+            rng if o.range is None else o.range)
+
+
+def _ordinary_kriging(px, py, pv, tx, ty, o=None):
+    o = o or Interp("kriging")
+    f, nug, sill, rng = variogram_params(px, py, pv, o)
     n = len(pv)
-    nug, sill, rng = fit_variogram(px, py, pv)
-    d = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
+    if o.neighbours and o.neighbours < n or o.radius:
+        # local kriging: a small system per point with its nearest boreholes only
+        k = min(o.neighbours or 16, n)
+        d, idx = _neighbourhood(px, py, tx, ty, Interp(neighbours=k, radius=o.radius))
+        out = np.empty(len(tx))
+        for s in range(0, len(tx), 5000):
+            ii = idx[s:s + 5000]
+            valid = np.isfinite(d[s:s + 5000])
+            xs, ys = px[ii], py[ii]
+            dd = np.hypot(xs[:, :, None] - xs[:, None, :], ys[:, :, None] - ys[:, None, :])
+            m = len(ii)
+            K = np.ones((m, k + 1, k + 1))
+            K[:, :k, :k] = f(dd, nug, sill, rng)
+            K[:, k, k] = 0.0
+            # boreholes outside the search radius: decouple them (weight forced to zero)
+            off = ~valid
+            K[:, :k, :k][np.broadcast_to(off[:, :, None], (m, k, k)) | np.broadcast_to(off[:, None, :], (m, k, k))] = 0
+            K[:, :k, :k][:, np.arange(k), np.arange(k)] = np.where(off, 1.0, 0.0)
+            K[:, :k, k] = np.where(off, 0.0, 1.0)
+            K[:, k, :k] = np.where(off, 0.0, 1.0)
+            rhs = np.concatenate([np.where(off, 0.0, f(np.where(valid, d[s:s + 5000], 0), nug, sill, rng)),
+                                  np.ones((m, 1))], axis=1)
+            try:
+                w = np.linalg.solve(K, rhs[..., None])[..., 0]
+            except np.linalg.LinAlgError:
+                w = np.stack([np.linalg.lstsq(K[j], rhs[j], rcond=None)[0] for j in range(m)])
+            out[s:s + 5000] = (w[:, :k] * pv[ii]).sum(1)
+        return out
+    dmat = np.hypot(px[:, None] - px[None, :], py[:, None] - py[None, :])
     K = np.ones((n + 1, n + 1))
-    K[:n, :n] = _spherical(d, nug, sill, rng)
+    K[:n, :n] = f(dmat, nug, sill, rng)
     K[n, n] = 0.0
     out = np.empty(len(tx))
     for s in range(0, len(tx), 20000):  # chunk to bound memory
         dt = np.hypot(px[:, None] - tx[None, s:s + 20000], py[:, None] - ty[None, s:s + 20000])
-        rhs = np.vstack([_spherical(dt, nug, sill, rng), np.ones((1, dt.shape[1]))])
+        rhs = np.vstack([f(dt, nug, sill, rng), np.ones((1, dt.shape[1]))])
         w = np.linalg.lstsq(K, rhs, rcond=None)[0]
         out[s:s + 20000] = w[:n].T @ pv
     return out

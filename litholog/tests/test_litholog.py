@@ -670,3 +670,56 @@ def test_crossval_scoring_and_report(tmp_path):
     assert u.loc[("horizons_idw", "4"), "detection_pct"] > u.loc[("voxel", "4"), "detection_pct"]
     assert u.loc[("horizons_idw", "4"), "detection_pct"] >= 90
     assert (tmp_path / "cv" / "validation.pdf").exists()
+
+
+def test_interpolation_influence_options():
+    from litholog.grid import Interp, interpolate
+
+    rng = np.random.default_rng(0)
+    px, py = rng.uniform(0, 1000, (2, 30))
+    pv = px / 100
+    g = np.linspace(0, 1000, 25)
+    for o in (Interp("idw", power=4), Interp("idw", neighbours=6), Interp("idw", radius=150),
+              Interp("kriging", variogram="exponential", range=400), Interp("kriging", neighbours=10),
+              Interp("smooth")):
+        z = interpolate(px, py, pv, g, g, o)
+        assert np.isfinite(z).all()
+        assert abs(interpolate(px, py, pv, [px[3]], [py[3]], o)[0, 0] - pv[3]) < 1e-6   # honours the data
+    # a small radius keeps influence local: far from all data the nearest borehole decides
+    far = interpolate([0, 1000], [0, 0], [1, 5], [10], [0], Interp("idw", radius=50))[0, 0]
+    assert abs(far - 1) < 1e-9
+
+
+def test_horizon_constraints(tmp_path):
+    from litholog.constraints import load_constraints
+    from litholog.horizons import build_horizon_model, horizon_volumes
+
+    rows = ["Name\tX\tY\tZ\tMaterial"]
+    rng = np.random.default_rng(7)
+    for k in range(16):
+        x, y = rng.uniform(0, 3000, 2)
+        rows += [f"B{k}\t{x:.1f}\t{y:.1f}\t{120 - d:.2f}\t{m}"
+                 for d, m in [(0, "1"), (3, "2"), (10, "3"), (30, "4"), (33, "3"), (100, "3")]]
+    (tmp_path / "p.txt").write_text("\n".join(rows) + "\n")
+    proj = load_project(tmp_path / "p.txt")
+    (tmp_path / "c.csv").write_text("Horizon,Type,X,Y,Value,Feature\n"
+                                    "4,absent,1000,1000,,A\n4,absent,2000,1000,,A\n4,absent,2000,2000,,A\n"
+                                    "4,absent,1000,2000,,A\ncode 3,thickness,1500,1500,50,\n")
+    c = load_constraints(tmp_path / "c.csv")
+    assert c.summary() == "1 absent, 1 thickness"
+    base = build_horizon_model(proj, cell=50)
+    m = build_horizon_model(proj, cell=50, constraints=c)
+    X, Y = np.meshgrid(m.x, m.y)
+    t4 = m.h_top[3] - m.h_bot[3]
+    square = (X > 1050) & (X < 1950) & (Y > 1050) & (Y < 1950) & m.inside
+    assert np.nanmax(t4[square]) == 0                                          # layer removed in the area
+    assert horizon_volumes(m)["volume_mcm"][3] < horizon_volumes(base)["volume_mcm"][3]
+    # KML names: 'H4 pinchout' etc., latitude/longitude reprojected
+    kml = ('<kml xmlns="http://www.opengis.net/kml/2.2"><Placemark><name>H4 pinchout</name><LineString>'
+           '<coordinates>77.5,8.3,0 77.6,8.35,0</coordinates></LineString></Placemark>'
+           '<Placemark><name>code 3 thickness 12</name><Point><coordinates>77.55,8.32,0</coordinates></Point>'
+           '</Placemark></kml>')
+    (tmp_path / "c.kml").write_text(kml)
+    k = load_constraints(tmp_path / "c.kml", crs="EPSG:32643")
+    assert [(i.target, i.kind) for i in k.items] == [("h4", "pinchout"), ("c:3", "thickness")]
+    assert k.items[1].value == 12 and k.items[0].xy[0, 0] > 100000

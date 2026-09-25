@@ -179,39 +179,61 @@ def horizon_table(project, horizons, assignment) -> pd.DataFrame:
 # 2-4. Surfaces, block model, volumes
 
 
-def horizon_thickness(tab: pd.DataFrame, n: int, gx, gy, method: str = "idw") -> list:
-    """Thickness grid of each of ``n`` horizons from the per-hole table (see ``horizon_table``)."""
-    hx, hy = tab["x"].to_numpy(float), tab["y"].to_numpy(float)
+def horizon_thickness(tab: pd.DataFrame, n: int, gx, gy, method="idw", constraints=None, horizons=None) -> list:
+    """Thickness grid of each of ``n`` horizons from the per-hole table (see ``horizon_table``).
+
+    ``method``: a name or ``grid.Interp`` (influence settings). ``constraints``: pinch-out lines,
+    thickness points and absent areas added to the data of the horizons they name.
+    """
+    hx0, hy0 = tab["x"].to_numpy(float), tab["y"].to_numpy(float)
     shape = (len(gy), len(gx))
+    if constraints is not None:
+        # pinch-out points are spaced like the boreholes (median nearest-neighbour distance)
+        from scipy.spatial import cKDTree
+
+        xy = np.column_stack([hx0, hy0])
+        spacing = float(np.median(cKDTree(xy).query(xy, k=2)[0][:, 1])) if len(xy) > 2 else 500.0
+    else:
+        spacing = 0.0
     thick = []
     for k in range(n):
         v = tab[f"h{k}"]
         ok = v.notna().to_numpy()
-        if ok.sum() >= 2:
-            vv = v[ok].to_numpy(float)
-            t = np.clip(interpolate(hx[ok], hy[ok], vv, gx, gy, method), 0, None)
+        hx, hy = hx0[ok], hy0[ok]
+        vv = v[ok].to_numpy(float)
+        code = horizons[k]["code"] if horizons else None
+        if constraints is not None and horizons:
+            extra = constraints.extra_points(k, code, spacing)
+            if len(extra):
+                hx, hy, vv = np.r_[hx, extra[:, 0]], np.r_[hy, extra[:, 1]], np.r_[vv, extra[:, 2]]
+        if len(vv) >= 2:
+            t = np.clip(interpolate(hx, hy, vv, gx, gy, method), 0, None)
             if (vv <= 0).any():
                 # Pinch-out: interpolation of thickness alone never reaches zero, so the layer
                 # would spread thinly everywhere. A presence indicator (1 = present) decides
                 # where the layer exists; the edge is tapered over the 0.35-0.65 band.
-                ind = interpolate(hx[ok], hy[ok], (vv > 0).astype(float), gx, gy, method)
+                ind = interpolate(hx, hy, (vv > 0).astype(float), gx, gy, method)
                 t = t * np.clip((ind - 0.35) / 0.3, 0, 1)
-        elif ok.sum() == 1:
-            t = np.full(shape, float(v[ok].iloc[0]))
+        elif len(vv) == 1:
+            t = np.full(shape, float(vv[0]))
         else:
             t = np.zeros(shape)
+        if constraints is not None and horizons:
+            m = constraints.absent_mask(k, code, gx, gy)
+            if m is not None:
+                t = np.where(m, 0.0, t)
         thick.append(t)
     return thick
 
 
-def predict_log(project, x: float, y: float, method: str = "idw", scale: float = 25.0):
+def predict_log(project, x: float, y: float, method="idw", scale: float = 25.0, constraints=None):
     """Predicted log at (x, y) from the boreholes of ``project``: [(top_depth, bottom_depth, code)]."""
     horizons, assignment = assign_horizons(project, scale)
     tab = horizon_table(project, horizons, assignment)
     gx, gy = np.array([float(x)]), np.array([float(y)])
     hx, hy = tab["x"].to_numpy(float), tab["y"].to_numpy(float)
     base = float(np.clip(interpolate(hx, hy, tab["depth"], gx, gy, "linear"), 0, None)[0, 0])
-    thick = [float(t[0, 0]) for t in horizon_thickness(tab, len(horizons), gx, gy, method)]
+    thick = [float(t[0, 0]) for t in horizon_thickness(tab, len(horizons), gx, gy, method, constraints, horizons)]
     out, d = [], 0.0
     for k, (h, t) in enumerate(zip(horizons, thick)):
         top = min(d, base)
@@ -222,8 +244,9 @@ def predict_log(project, x: float, y: float, method: str = "idw", scale: float =
     return out
 
 
-def build_horizon_model(project, cell: float | None = None, dz: float | None = None, method: str = "idw",
-                        boundary=None, dem=None, target: int = 120, scale: float = 25.0) -> BlockModel:
+def build_horizon_model(project, cell: float | None = None, dz: float | None = None, method="idw",
+                        boundary=None, dem=None, target: int = 120, scale: float = 25.0,
+                        constraints=None) -> BlockModel:
     horizons, assignment = assign_horizons(project, scale)
     tab = horizon_table(project, horizons, assignment)
     hx, hy = tab["x"].to_numpy(float), tab["y"].to_numpy(float)
@@ -244,7 +267,7 @@ def build_horizon_model(project, cell: float | None = None, dz: float | None = N
         ground = np.where(np.isfinite(g), g, ground)
     base_depth = np.clip(interpolate(hx, hy, tab["depth"], gx, gy, "linear"), 0, None)
 
-    thick = horizon_thickness(tab, len(horizons), gx, gy, method)
+    thick = horizon_thickness(tab, len(horizons), gx, gy, method, constraints, horizons)
     # Stack from the ground; the deepest horizon fills to the base of drilling.
     tops, bots = [], []
     d = np.zeros(ground.shape)
@@ -295,6 +318,8 @@ def build_horizon_model(project, cell: float | None = None, dz: float | None = N
     model.h_volumes = hvol
     model.h_table = tab
     model.kind = "horizon"
+    model.interp = method
+    model.constraints = constraints
     lone = sum(h["n"] <= 1 for h in horizons)
     model.h_note = (f"{lone} of {len(horizons)} horizons occur in a single borehole only: the layers do not "
                     "continue between holes, so the voxel method may represent this data better."

@@ -152,6 +152,25 @@ litholog model data.xlsx --sy 4=0.015 --only 4
 4. Volumes are integrated exactly from the thickness grids; per-horizon volumes, mean thickness and
    area covered go to `horizons.csv`. Solids are meshed straight from the horizon surfaces.
 
+**Borehole influence** (as in GMS), for the horizon method:
+
+```bash
+litholog model data.xlsx --grid-method kriging --variogram exponential --range 3000 --neighbours 16
+litholog model data.xlsx --power 4 --radius 2500 --constraints interpretation.kml
+```
+
+* `--power` IDW exponent (higher = each borehole's influence stays local), `--neighbours N` nearest
+  boreholes only, `--radius` search radius in metres;
+* kriging `--variogram spherical|exponential|gaussian` with `--range`, `--sill`, `--nugget`
+  (fitted to the data when not given); `--grid-method smooth` for a smooth TIN;
+* `--constraints`: pinch-out lines, areas where a layer is absent, and thickness points, for one
+  horizon (`H4`) or all horizons of a unit (`code 4`). Draw them in Google Earth / QGIS and name each
+  line, polygon or point like `H4 pinchout`, `code 4 absent`, `H7 thickness 6` (KML/KMZ/GeoJSON), or
+  list them in a CSV with columns Horizon, Type, X, Y, Value, Feature.
+
+In Studio: 3D Model ▸ Borehole influence (with the variogram of each horizon) and ▸ Constraints.
+`litholog crossval` with the same options scores "your settings" against the defaults.
+
 **Voxel method (`--method voxel`)** — each voxel takes the lithology favoured by an inverse-distance
 vote of the boreholes (`--datum depth|elevation`); better for irregular bodies and lenses that do
 not continue between holes. Volumes use the vote proportions so thin units are not under-counted.
@@ -212,6 +231,8 @@ A ribbon interface with project tree, properties and message panels; everything 
 * **Legend bar** under the 3D view: colour, name and volume of each layer. Click a layer to edit it,
   right-click to hide / show / isolate it, double-click the title to rename the legend. Saved images
   include the legend.
+* **Views**: oblique, front, back, left and right side, top — on the 3D Model and View tabs; image
+  export can save one view or all standard views at once, at the chosen width, DPI and text size.
 * **Layer properties**: colour picker, name, 2D pattern (with preview), group, 3D opacity and
   visibility; save / load the legend as CSV. Changes update the 3D view, logs, sections and maps.
 * **Volumes** by layer and by horizon, with specific yield → storage.

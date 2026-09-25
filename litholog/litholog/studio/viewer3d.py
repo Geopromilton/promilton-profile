@@ -266,7 +266,9 @@ class Viewer3D(QWidget):
             axes_ranges=[b[0], b[1], b[2], b[3], b[4] / ve, b[5] / ve])
         try:   # sharp 2D text in the bundled font instead of scaled 3D text
             g.SetUseTextActor3D(False)
-            fs, ts = self._fs, self._ts
+            # at print size the axes' text renders about twice as large as other text of the same
+            # font size (VTK axis scaling), so it is scaled down to match the chosen point size
+            fs, ts = self._fs, (self._ts if self._ts == 1.0 else self._ts * 0.55)
             g.SetScreenSize(12)          # text size comes from the font size alone
             g.SetLabelOffset(8 * ts)
             try:
@@ -458,6 +460,30 @@ class Viewer3D(QWidget):
         self._style_scalar_bars()
         self.plotter.render()
         return True
+
+    def show_constraints(self, cons, model, ve):
+        """Pinch-out lines (orange), absent areas (magenta outline) and thickness points (white) drawn on the
+        ground surface of the model."""
+        if self._fs == 1.0:
+            self._draws = [d for d in self._draws if d[0] != "show_constraints"]
+            self._draws.append(("show_constraints", (cons, model, ve), {}))
+
+        colors = {"pinchout": "#FF8C1A", "absent": "#E040FB", "thickness": "#FFFFFF"}
+        gz = np.nan_to_num(model.ground, nan=np.nanmean(model.ground))
+        for k, c in enumerate(cons.items):
+            xy = c.xy if c.kind != "absent" else np.vstack([c.xy, c.xy[:1]])
+            ix = np.clip(np.searchsorted(model.x, xy[:, 0]), 0, len(model.x) - 1)
+            iy = np.clip(np.searchsorted(model.y, xy[:, 1]), 0, len(model.y) - 1)
+            z = gz[iy, ix] * ve + (model.x[-1] - model.x[0]) * 0.002
+            pts = np.column_stack([xy, z])
+            name = f"constraint_{k}"
+            if c.kind == "thickness" or len(pts) == 1:
+                self.extras[name] = self.plotter.add_mesh(pv.PolyData(pts), color=colors[c.kind],
+                                                          point_size=10 * self._fs, render_points_as_spheres=True,
+                                                          name=name)
+            else:
+                self.extras[name] = self.plotter.add_mesh(pv.lines_from_points(pts), color=colors[c.kind],
+                                                          line_width=4 * self._fs, name=name)
 
     def _style_scalar_bars(self):
         for sb in list(getattr(self.plotter, "scalar_bars", {}).values()):

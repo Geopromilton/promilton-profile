@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -51,6 +52,11 @@ class MainWindow(QMainWindow):
         self.dem_path = None
         self.layer_state = {}    # code -> {"visible": bool, "opacity": 0-1}
         self.hz_state = {}       # horizon index -> visible
+        from ..grid import Interp
+
+        self.interp = Interp("idw")   # borehole influence settings (horizon model)
+        self.constraints = None
+        self.constraints_path = None
         self._redo = {}          # document -> callable that redraws it (after legend edits)
         self._current_map = None
 
@@ -100,6 +106,10 @@ class MainWindow(QMainWindow):
         r.group(md, "Model", [("build", "mdi6.cube-outline", "Build model", self.build_model, False)])
         r.group(md, "Layers", [("layers", "mdi6.palette-swatch-outline", "Layer\nproperties",
                                 lambda: self.layer_properties(), False)])
+        r.group(md, "Horizon controls", [
+            ("influence", "mdi6.tune-variant", "Borehole\ninfluence", self.influence_settings, False),
+            ("constraints", "mdi6.vector-polyline-edit", "Constraints", self.load_constraints, False),
+        ])
         r.group(md, "Views", [
             ("v_iso", "mdi6.axis-arrow", "Oblique", lambda: self.view("iso_sw"), False),
             ("v_ne", "mdi6.rotate-3d-variant", "Oblique NE", lambda: self.view("iso_ne"), False),
@@ -152,6 +162,14 @@ class MainWindow(QMainWindow):
             ("sh_legend", "mdi6.format-list-bulleted-type", "Legend bar", self.toggle_legend, True),
             ("sh_grid", "mdi6.axis-arrow-info", "Axes grid", self.toggle_grid, True),
             ("sh_terrain", "mdi6.terrain", "Terrain\n(DEM)", self.toggle_terrain, True),
+        ])
+        r.group(vw, "Views", [
+            ("vw_iso", "mdi6.axis-arrow", "Oblique", lambda: self.view("iso_sw"), False),
+            ("vw_front", "mdi6.arrow-up-bold-box-outline", "Front", lambda: self.view("front"), False),
+            ("vw_back", "mdi6.arrow-down-bold-box-outline", "Back", lambda: self.view("back"), False),
+            ("vw_left", "mdi6.arrow-right-bold-box-outline", "Left\nside", lambda: self.view("left"), False),
+            ("vw_right", "mdi6.arrow-left-bold-box-outline", "Right\nside", lambda: self.view("right"), False),
+            ("vw_top", "mdi6.arrow-collapse-down", "Top", lambda: self.view("top"), False),
         ])
         r.group(vw, "Rendering", [
             ("rn_grain", "mdi6.texture-box", "Rock\ntexture", lambda on: self.set_texture("grain", on), True),
@@ -235,8 +253,18 @@ class MainWindow(QMainWindow):
                                  "like GMS 'Horizons → Solids'.\nVoxel: each cell takes the lithology most "
                                  "boreholes have at that depth (good for irregular bodies/lenses).")
         self.p_grid = QComboBox()
-        for label, val in [("Inverse distance", "idw"), ("Kriging", "kriging"), ("Linear (TIN)", "linear")]:
+        for label, val in [("Inverse distance", "idw"), ("Kriging", "kriging"), ("Linear (TIN)", "linear"),
+                           ("Smooth TIN", "smooth")]:
             self.p_grid.addItem(label, val)
+        self.p_grid.currentIndexChanged.connect(lambda _: setattr(self.interp, "method", self.p_grid.currentData()))
+        self.p_influence = QPushButton(theme.icon("mdi6.tune-variant"), " Influence…")
+        self.p_influence.setToolTip("How strongly and how far each borehole influences the layers: IDW power, "
+                                    "nearest boreholes, search radius, variogram")
+        self.p_influence.clicked.connect(self.influence_settings)
+        self.p_cons = QPushButton(theme.icon("mdi6.vector-polyline-edit"), " Constraints…")
+        self.p_cons.setToolTip("Pinch-out lines, areas where a layer is absent, thickness points "
+                               "(CSV/Excel, KML/KMZ from Google Earth, GeoJSON)")
+        self.p_cons.clicked.connect(self.load_constraints)
         self.p_usedem = QCheckBox("Use DEM as ground surface")
         self.p_rectify = QCheckBox("Replace collar elevations with DEM")
         self.p_usedem.setEnabled(False)
@@ -251,6 +279,10 @@ class MainWindow(QMainWindow):
         self.p_smooth = QSlider(Qt.Horizontal, minimum=0, maximum=12, value=4)
         f.addRow("Method", self.p_method)
         f.addRow("Interpolation", self.p_grid)
+        hb = QHBoxLayout()
+        hb.addWidget(self.p_influence)
+        hb.addWidget(self.p_cons)
+        f.addRow("Horizons", hb)
         f.addRow("Correlate at", self.p_datum)
         f.addRow("Cell (XY)", self.p_cell)
         f.addRow("Cell (Z)", self.p_dz)
@@ -400,6 +432,7 @@ class MainWindow(QMainWindow):
             self.project, self.data_path, self.model, self.solids = project, path, None, None
             if not after:  # new data (not a project file): start with a clean layer set-up
                 self.dem, self.dem_path, self.layer_state, self._legend_rows = None, None, {}, {}
+                self.constraints, self.constraints_path = None, None
                 self.p_usedem.setEnabled(False)
                 self.p_rectify.setEnabled(False)
             self.legend_path = legend
@@ -436,7 +469,7 @@ class MainWindow(QMainWindow):
                 "use_dem": self.p_usedem.isChecked(), "rectify": self.p_rectify.isChecked(),
                 "layers": self.layer_state, "legend_rows": list(getattr(self, "_legend_rows", {}).values()),
                 "legend_title": self.viewer.legend.title, "background": self.viewer.background,
-                "look": self.viewer.look, "horizons_visible": {str(k): v for k, v in self.hz_state.items()}}
+                "look": self.viewer.look, "influence": self.interp.__dict__, "constraints": self.constraints_path, "horizons_visible": {str(k): v for k, v in self.hz_state.items()}}
 
     def apply_settings(self, st: dict):
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
@@ -470,6 +503,11 @@ class MainWindow(QMainWindow):
             for k in ("vivid", "edges", "ssao"):
                 self.ribbon.buttons[f"rn_{k}"].setChecked(bool(lk.get(k)))
         self._pending_hz = {int(k): v for k, v in st.get("horizons_visible", {}).items()}
+        if st.get("influence"):
+            from ..grid import Interp
+
+            self.interp = Interp(**st["influence"])
+        self._pending_constraints = st.get("constraints")
         for w in (self.p_datum, self.p_cut, self.p_cell, self.p_dz, self.p_smooth, self.p_ve, self.p_opacity,
                   self.p_holes, self.p_labels, self.p_bnd, self.p_clipb):
             w.blockSignals(False)
@@ -507,6 +545,9 @@ class MainWindow(QMainWindow):
         def after():
             if rows:
                 self.project.legend = self.project.legend.updated(rows)
+            cp = getattr(self, "_pending_constraints", None)
+            if cp and Path(cp).exists():
+                self._load_constraints(cp)
             if dem and Path(dem).exists():
                 self._load_dem(dem)
 
@@ -686,9 +727,11 @@ class MainWindow(QMainWindow):
         horizons = self.p_method.currentData() == "horizons"
         self.p_datum.setEnabled(not horizons)
         self.p_grid.setEnabled(horizons)
+        self.p_influence.setEnabled(horizons)
+        self.p_cons.setEnabled(horizons)
         self.p_smooth.setEnabled(not horizons)
 
-    def _build(self, project, method, cell, dz, datum, grid, boundary, dem, rectify):
+    def _build(self, project, method, cell, dz, datum, grid, boundary, dem, rectify, constraints=None):
         """Runs on the worker thread."""
         if dem is not None:
             from ..dem import rectify_collars
@@ -700,7 +743,8 @@ class MainWindow(QMainWindow):
         if method == "horizons":
             from ..horizons import build_horizon_model
 
-            return build_horizon_model(project, cell, dz, method=grid, boundary=boundary, dem=dem)
+            return build_horizon_model(project, cell, dz, method=grid, boundary=boundary, dem=dem,
+                                       constraints=constraints)
         from ..model3d import build_model
 
         return build_model(project, cell, dz, datum=datum, boundary=boundary, dem=dem)
@@ -725,6 +769,8 @@ class MainWindow(QMainWindow):
                      + (f"; clipped to study area, {100 * (1 - model.coverage):.0f} % beyond borehole cover"
                         if model.coverage is not None else ""))
             if getattr(model, "kind", "") == "horizon":
+                self.log(f"  Borehole influence: {model.interp.label() if hasattr(model.interp, 'label') else model.interp}"
+                         + (f"; constraints: {self.constraints.summary()}" if self.constraints else ""))
                 self.log(f"  {len(model.horizons)} horizons traced between the boreholes: "
                          + "; ".join(model.h_labels))
                 if model.h_note:
@@ -739,7 +785,65 @@ class MainWindow(QMainWindow):
             self.docs.setCurrentWidget(self.viewer)
 
         self.run("Building 3D model", self._build, done, self.project, self.p_method.currentData(), cell, dz,
-                 self.p_datum.currentData(), self.p_grid.currentData(), b, dem, self.p_rectify.isChecked())
+                 self.p_datum.currentData(), self._interp_now(), b, dem, self.p_rectify.isChecked(),
+                 self.constraints)
+
+    def _interp_now(self):
+        from dataclasses import replace
+
+        return replace(self.interp, method=self.p_grid.currentData())
+
+    def influence_settings(self):
+        if not self.need_project():
+            return
+        dlg = InfluenceDialog(self.project, self._interp_now(), self.model, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.interp = dlg.value()
+            self.p_grid.blockSignals(True)
+            self.p_grid.setCurrentIndex(max(0, self.p_grid.findData(self.interp.method)))
+            self.p_grid.blockSignals(False)
+            self.log(f"Borehole influence: {self.interp.label()}. Rebuilding the model …")
+            self.build_model()
+
+    def load_constraints(self):
+        if not self.need_project():
+            return
+        m = QMessageBox(self)
+        m.setWindowTitle("Horizon constraints")
+        m.setText("Pinch-out lines, areas where a layer is absent and thickness points, for one horizon "
+                  "(e.g. H4 = horizon 4 in the Project tree) or every horizon of a unit (code 4).\n\n"
+                  "CSV/Excel columns: Horizon, Type (pinchout / absent / thickness), X, Y, Value, Feature.\n"
+                  "Google Earth KML/KMZ or GeoJSON: name each line / polygon / point like "
+                  "'H4 pinchout', 'code 4 absent', 'H7 thickness 6'.")
+        b_load = m.addButton("Load file…", QMessageBox.AcceptRole)
+        b_clear = m.addButton("Remove constraints", QMessageBox.DestructiveRole) if self.constraints else None
+        m.addButton(QMessageBox.Cancel)
+        m.exec()
+        if b_clear is not None and m.clickedButton() is b_clear:
+            self.constraints, self.constraints_path = None, None
+            self.log("Constraints removed. Rebuilding …")
+            self.build_model()
+            return
+        if m.clickedButton() is not b_load:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Horizon constraints", "",
+                                              "Constraints (*.csv *.xlsx *.kml *.kmz *.geojson *.json)")
+        if path:
+            self._load_constraints(path, rebuild=True)
+
+    def _load_constraints(self, path, rebuild=False):
+        from ..constraints import load_constraints
+
+        b = self.project.boreholes.dropna(subset=["x", "y"])
+        try:
+            c = load_constraints(path, None, (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()))
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Constraints", str(e))
+            return
+        self.constraints, self.constraints_path = c, path
+        self.log(f"Constraints {c.source}: {c.summary()}" + (f" ({c.crs_note})" if c.crs_note else ""))
+        if rebuild:
+            self.build_model()
 
     def _auto_ve(self):
         m = self.model
@@ -781,6 +885,8 @@ class MainWindow(QMainWindow):
         self.viewer.set_opacity(self.p_opacity.value() / 100, self._unit_opacity())
         if self.ribbon.buttons["sh_terrain"].isChecked() and self.dem is not None:
             self.viewer.show_terrain(self.dem, self.model, ve)
+        if self.constraints is not None and getattr(self.model, "kind", "") == "horizon":
+            self.viewer.show_constraints(self.constraints, self.model, ve)
         self._update_legend()
         self.viewer.plotter.render()
         self.ribbon.buttons["clip"].setChecked(False)
@@ -1329,8 +1435,11 @@ class MainWindow(QMainWindow):
                          f"{row['detection_pct']:.0f} % found, top depth ±{row['top_mae_m']:.1f} m")
             self.log(f"Report and tables saved in {folder}")
 
+        interp = self._interp_now()
+        custom = interp != type(interp)("idw") or self.constraints is not None
         self.run("Cross-validating (each borehole hidden and predicted from the others)", validation_report, done,
-                 self.project, folder, None, b, unit, self._title())
+                 self.project, folder, None, b, unit, self._title(), True, None,
+                 interp if custom else None, self.constraints)
 
     # ------------------------------------------------------------------ export
     def save_image(self):
@@ -1350,9 +1459,28 @@ class MainWindow(QMainWindow):
             return
         px = int(round(width_mm / 25.4 * dpi))
 
+        view = dlg.view() if is3d else None
+
         def work():
             if is3d:
-                return self.viewer.export_image(path, px, dpi, text_pt=text_pt)
+                if view is None:
+                    return self.viewer.export_image(path, px, dpi, text_pt=text_pt)
+                cam = self.viewer.plotter.camera_position
+                par = (self.viewer.plotter.camera.parallel_projection, self.viewer.plotter.camera.parallel_scale)
+                names = ["iso_sw", "iso_ne", "front", "back", "left", "right", "top"] if view == "all" else [view]
+                stem, ext_ = path.rsplit(".", 1)
+                try:
+                    for nm in names:
+                        self.viewer.set_view(nm)
+                        out = path if len(names) == 1 else f"{stem}_{nm}.{ext_}"
+                        self.viewer.export_image(out, px, dpi, text_pt=text_pt)
+                        self.log(f"  saved {out}")
+                        QApplication.processEvents()
+                finally:
+                    self.viewer.plotter.camera_position = cam
+                    self.viewer.plotter.camera.parallel_projection, self.viewer.plotter.camera.parallel_scale = par
+                    self.viewer.plotter.render()
+                return path
             if text_pt:   # 2D pages: scale all text so the base size prints at text_pt
                 import matplotlib as mpl
 
@@ -1768,7 +1896,14 @@ class ExportImageDialog(QDialog):
         f.addRow("Text size", self.text)
         f.addRow("Format", self.fmt)
         f.addRow(self.info)
+        self.views = QComboBox()
+        for label, v in (("Current view", None), ("Oblique (from SW)", "iso_sw"), ("Oblique (from NE)", "iso_ne"),
+                         ("Front (from south)", "front"), ("Back (from north)", "back"),
+                         ("Left side (from west)", "left"), ("Right side (from east)", "right"),
+                         ("Top (plan)", "top"), ("All standard views (one image each)", "all")):
+            self.views.addItem(label, v)
         if is3d:
+            f.insertRow(0, "View", self.views)
             n = QLabel("The 3D scene is re-rendered at full resolution (not enlarged); the legend bar is "
                        "added below it.")
             n.setObjectName("Dim")
@@ -1788,3 +1923,159 @@ class ExportImageDialog(QDialog):
 
     def values(self):
         return self.width.value(), self.dpi.currentData(), self.fmt.currentData(), self.text.value() or None
+
+    def view(self):
+        return self.views.currentData()
+
+
+class InfluenceDialog(QDialog):
+    """Borehole influence (GMS-style interpolation options) with the variogram of the chosen horizon."""
+
+    def __init__(self, project, interp, model=None, parent=None):
+        super().__init__(parent)
+        from dataclasses import replace
+
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        self.setWindowTitle("Borehole influence")
+        self.resize(880, 520)
+        self.project, self.model, self.o = project, model, replace(interp)
+        root = QHBoxLayout(self)
+        form = QFormLayout()
+        root.addLayout(form)
+        self.method = QComboBox()
+        for label, v in (("Inverse distance (IDW)", "idw"), ("Kriging", "kriging"), ("Linear TIN", "linear"),
+                         ("Smooth TIN (Clough-Tocher)", "smooth")):
+            self.method.addItem(label, v)
+        self.method.setCurrentIndex(max(0, self.method.findData(self.o.method)))
+        self.power = QDoubleSpinBox(minimum=0.5, maximum=10, singleStep=0.5, decimals=1)
+        self.power.setValue(self.o.power)
+        self.power.setToolTip("Higher = each borehole's influence stays local (bull's-eyes); lower = smoother, "
+                              "influence spreads further.")
+        self.nbrs = QDoubleSpinBox(minimum=0, maximum=500, decimals=0, specialValueText="All boreholes")
+        self.nbrs.setValue(self.o.neighbours or 0)
+        self.radius = QDoubleSpinBox(minimum=0, maximum=1e6, singleStep=250, decimals=0, suffix=" m",
+                                     specialValueText="No limit")
+        self.radius.setValue(self.o.radius or 0)
+        self.vmodel = QComboBox()
+        self.vmodel.addItems(["spherical", "exponential", "gaussian"])
+        self.vmodel.setCurrentText(self.o.variogram)
+        self.auto = QCheckBox("Fit range, sill and nugget to the data")
+        self.auto.setChecked(self.o.range is None)
+        self.range_ = QDoubleSpinBox(minimum=1, maximum=1e6, singleStep=100, decimals=0, suffix=" m")
+        self.sill = QDoubleSpinBox(minimum=0, maximum=1e6, singleStep=1, decimals=2)
+        self.nugget = QDoubleSpinBox(minimum=0, maximum=1e6, singleStep=0.5, decimals=2)
+        self.target = QComboBox()
+        form.addRow("Method", self.method)
+        form.addRow("IDW power", self.power)
+        form.addRow("Nearest boreholes", self.nbrs)
+        form.addRow("Search radius", self.radius)
+        form.addRow(QLabel(""))
+        form.addRow("Variogram", self.vmodel)
+        form.addRow("", self.auto)
+        form.addRow("Range", self.range_)
+        form.addRow("Sill", self.sill)
+        form.addRow("Nugget", self.nugget)
+        form.addRow("Show for", self.target)
+        note = QLabel("Tip: compare settings with Analysis ▸ Cross-validation — it scores 'your settings' "
+                      "against the defaults at every borehole.")
+        note.setObjectName("Dim")
+        note.setWordWrap(True)
+        form.addRow(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Apply && rebuild")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+        self.fig = Figure(figsize=(5, 4), dpi=100)
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        root.addWidget(self.canvas, 1)
+        self._data = []
+        if model is not None and getattr(model, "kind", "") == "horizon":
+            tab = model.h_table
+            for k, lab in enumerate(model.h_labels):
+                v = tab[f"h{k}"]
+                ok = v.notna()
+                self._data.append((f"{k + 1}. {lab} (thickness)", tab["x"][ok], tab["y"][ok], v[ok]))
+        else:
+            from ..grid import borehole_values
+
+            for c in dict.fromkeys(c for c in project.lithology["code"] if c):
+                v = borehole_values(project, f"thickness:{c}").dropna(subset=["value"])
+                if len(v) >= 3:
+                    self._data.append((f"{project.legend.get(c).name} (thickness)", v["x"], v["y"], v["value"]))
+        for d in self._data:
+            self.target.addItem(d[0])
+        for w in (self.method, self.vmodel, self.target):
+            w.currentIndexChanged.connect(self._update)
+        for w in (self.power, self.nbrs, self.radius, self.range_, self.sill, self.nugget):
+            w.valueChanged.connect(self._update)
+        self.auto.toggled.connect(self._update)
+        self._fill_fitted()
+        if self.o.range is not None:
+            self.range_.setValue(self.o.range)
+            self.sill.setValue(self.o.sill or 0)
+            self.nugget.setValue(self.o.nugget or 0)
+        self._update()
+
+    def _fill_fitted(self):
+        if not self._data:
+            return
+        from ..grid import fit_variogram
+
+        _, x, y, v = self._data[self.target.currentIndex()]
+        n, s, r = fit_variogram(np.asarray(x, float), np.asarray(y, float), np.asarray(v, float),
+                                model=self.vmodel.currentText())
+        for w, val in ((self.range_, r), (self.sill, s), (self.nugget, n)):
+            w.blockSignals(True)
+            w.setValue(val)
+            w.blockSignals(False)
+
+    def _update(self, *_):
+        kr = self.method.currentData() == "kriging"
+        idw = self.method.currentData() == "idw"
+        self.power.setEnabled(idw)
+        self.nbrs.setEnabled(idw or kr)
+        self.radius.setEnabled(idw or kr)
+        for w in (self.vmodel, self.auto):
+            w.setEnabled(kr)
+        for w in (self.range_, self.sill, self.nugget):
+            w.setEnabled(kr and not self.auto.isChecked())
+        if self.auto.isChecked():
+            self._fill_fitted()
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        if not self._data:
+            ax.text(0.5, 0.5, "Not enough data for a variogram", ha="center", transform=ax.transAxes)
+            self.canvas.draw_idle()
+            return
+        from ..grid import VARIOGRAMS, experimental_variogram
+
+        name, x, y, v = self._data[self.target.currentIndex()]
+        lag, gam, cnt = experimental_variogram(x, y, v)
+        if len(lag):
+            ax.scatter(lag, gam, s=np.clip(cnt, 10, 80), c="#2E6F9E", label="Data (pairs of boreholes)", zorder=3)
+            h = np.linspace(0, lag.max() * 1.1, 200)
+            f = VARIOGRAMS[self.vmodel.currentText()]
+            ax.plot(h, f(h, self.nugget.value(), self.sill.value(), max(self.range_.value(), 1)),
+                    color="#E0A458", lw=2, label=f"{self.vmodel.currentText()} model")
+            if self.radius.value():
+                ax.axvline(self.radius.value(), color="#C0392B", ls="--", lw=1, label="Search radius")
+        ax.set_xlabel("Distance between boreholes (m)")
+        ax.set_ylabel("Semivariance (m²)")
+        ax.set_title(name, fontsize=10)
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.3)
+        self.fig.tight_layout()
+        self.canvas.draw_idle()
+
+    def value(self):
+        from ..grid import Interp
+
+        kr = self.method.currentData() == "kriging"
+        fixed = kr and not self.auto.isChecked()
+        return Interp(self.method.currentData(), self.power.value(), int(self.nbrs.value()) or None,
+                      self.radius.value() or None, self.vmodel.currentText(),
+                      self.range_.value() if fixed else None, self.sill.value() if fixed else None,
+                      self.nugget.value() if fixed else None)

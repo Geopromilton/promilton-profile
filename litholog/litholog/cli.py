@@ -94,8 +94,9 @@ def main(argv=None) -> int:
     md.add_argument("--dz", type=float, help="vertical voxel size (m)")
     md.add_argument("--method", default="horizons", choices=["horizons", "voxel"],
                     help="horizons: layers correlated between holes and stacked (continuous layers, default); voxel: indicator interpolation")
-    md.add_argument("--grid-method", default="idw", choices=["idw", "linear", "kriging"],
+    md.add_argument("--grid-method", default="idw", choices=["idw", "kriging", "linear", "smooth"],
                     help="interpolation of horizon thickness (horizons method)")
+    _influence_args(md)
     md.add_argument("--dem", help="DEM (GeoTIFF .tif or ESRI .asc) used as the ground surface")
     md.add_argument("--rectify", action="store_true", help="replace collar elevations with the DEM")
     md.add_argument("--datum", default="depth", choices=["depth", "elevation"],
@@ -177,10 +178,14 @@ def main(argv=None) -> int:
                                          "comparison, volume range and data support")
     cv.add_argument("data")
     cv.add_argument("-u", "--unit", metavar="CODE", help="unit to report in detail, e.g. 4 (default: most common)")
-    cv.add_argument("--methods", nargs="+", choices=["horizons_idw", "horizons_kriging", "voxel", "nearest"])
+    cv.add_argument("--methods", nargs="+",
+                    choices=["horizons_custom", "horizons_idw", "horizons_kriging", "voxel", "nearest"])
     cv.add_argument("--boundary", help="study-area polygon (.shp, .kml, .kmz, .geojson)")
     cv.add_argument("--crs", help="coordinate system of the borehole X/Y, e.g. EPSG:32643")
     cv.add_argument("--no-volumes", action="store_true", help="skip the volume comparison (faster)")
+    _influence_args(cv)
+    cv.add_argument("--grid-method", default="idw", choices=["idw", "kriging", "linear", "smooth"],
+                    help="interpolation for 'your settings' (with the options above)")
     cv.add_argument("-o", "--out", default="validation")
     cv.add_argument("--title")
     cv.add_argument("-l", "--legend")
@@ -458,6 +463,40 @@ def _model(a):
     return 0
 
 
+def _influence_args(p):
+    g = p.add_argument_group("borehole influence (horizons method)")
+    g.add_argument("--power", type=float, help="IDW exponent (default 2; higher = more local)")
+    g.add_argument("--neighbours", type=int, help="use only the N nearest boreholes")
+    g.add_argument("--radius", type=float, help="search radius (m) beyond which boreholes have no influence")
+    g.add_argument("--variogram", choices=["spherical", "exponential", "gaussian"], help="kriging variogram model")
+    g.add_argument("--range", type=float, help="kriging variogram range (m); default fitted")
+    g.add_argument("--sill", type=float, help="kriging variogram sill; default fitted")
+    g.add_argument("--nugget", type=float, help="kriging variogram nugget; default fitted")
+    g.add_argument("--constraints", help="pinch-out lines, absent areas, thickness points (CSV/Excel/KML/KMZ/GeoJSON)")
+
+
+def _interp(a):
+    from .grid import Interp
+
+    keys = ("power", "neighbours", "radius", "variogram", "range", "sill", "nugget")
+    if all(getattr(a, k, None) is None for k in keys) and getattr(a, "grid_method", "idw") == "idw":
+        return None
+    kw = {k: getattr(a, k) for k in keys if getattr(a, k, None) is not None}
+    return Interp(getattr(a, "grid_method", "idw") or "idw", **kw)
+
+
+def _constraints(a, project):
+    if not getattr(a, "constraints", None):
+        return None
+    from .constraints import load_constraints
+
+    b = project.boreholes.dropna(subset=["x", "y"])
+    c = load_constraints(a.constraints, getattr(a, "crs", None),
+                         (b["x"].min(), b["x"].max(), b["y"].min(), b["y"].max()))
+    print(f"Constraints {c.source}: {c.summary()}" + (f" ({c.crs_note})" if c.crs_note else ""))
+    return c
+
+
 def _build(a, project, boundary):
     """Lithology model per --method/--model (horizons by default) with optional --dem."""
     dem = None
@@ -476,8 +515,9 @@ def _build(a, project, boundary):
     if method == "horizons":
         from .horizons import build_horizon_model
 
-        return build_horizon_model(project, getattr(a, "cell", None), getattr(a, "dz", None),
-                                   method=getattr(a, "grid_method", "idw"), boundary=boundary, dem=dem)
+        interp = _interp(a) or getattr(a, "grid_method", "idw")
+        return build_horizon_model(project, getattr(a, "cell", None), getattr(a, "dz", None), method=interp,
+                                   boundary=boundary, dem=dem, constraints=_constraints(a, project))
     from .model3d import build_model
 
     return build_model(project, getattr(a, "cell", None), getattr(a, "dz", None), datum=a.datum,
@@ -646,8 +686,11 @@ def _crossval(a):
     boundary = _boundary(a, project)
     n = len(project.ids)
     print(f"Cross-validating {n} boreholes (each hidden and predicted from the others) …")
+    interp, cons = _interp(a), _constraints(a, project)
+    if interp is not None:
+        print(f"Your settings: {interp.label()}")
     r = validation_report(project, a.out, a.methods, boundary, a.unit.upper() if a.unit else None,
-                          a.title or project.name, volumes=not a.no_volumes)
+                          a.title or project.name, volumes=not a.no_volumes, interp=interp, constraints=cons)
     s = r["summary"]
     print("\nDepth logged correctly (mean / worst 10 %):")
     for _, row in s.iterrows():
