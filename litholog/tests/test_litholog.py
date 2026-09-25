@@ -130,3 +130,81 @@ def test_gms_import_and_convert(tmp_path):
     again = load_project(tmp_path / "b.xlsx")
     assert again.legend.get("1").name == "Top soil"
     assert again.borehole("H1").lithology["code"].tolist() == ["1", "3", "4", "3"]
+
+
+# --- Milestone 2: correlation, sections, fences ---------------------------------
+
+def _area(verts):
+    import numpy as np
+
+    v = np.asarray(verts, float)
+    x, y = v[:, 0], v[:, 1]
+    return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def _gms_project(tmp_path):
+    src = tmp_path / "b.txt"
+    src.write_text(GMS + "H3\t500\t200\t40\t1\nH3\t500\t200\t38\t4\nH3\t500\t200\t30\t3\nH3\t500\t200\t-5\t5\n"
+                   "H3\t500\t200\t-10\t5\n")
+    return load_project(src)
+
+
+def test_panel_tiles_without_gaps():
+    from litholog.correlate import Unit, align, panel
+
+    a = [Unit(100, 98, "1"), Unit(98, 70, "3"), Unit(70, 65, "4"), Unit(65, 40, "3"), Unit(40, 20, "5")]
+    b = [Unit(90, 88, "1"), Unit(88, 60, "3"), Unit(60, 30, "5"), Unit(30, 25, "4"), Unit(25, 10, "5")]
+    polys = panel(a, b, 0.0, 1000.0)
+    # Panel area = trapezoid between the ground line and the base line.
+    expected = 1000.0 * ((100 - 20) + (90 - 10)) / 2
+    assert abs(sum(_area(v) for _, v in polys) - expected) < 1e-6 * expected
+    pairs = align(a, b)
+    assert pairs[0] == (0, 0)  # topsoil joins topsoil
+    assert (1, 1) in pairs     # GBG joins GBG
+
+
+def test_identical_holes_join_layer_for_layer():
+    from litholog.correlate import Unit, panel
+
+    a = [Unit(50, 45, "A"), Unit(45, 20, "B")]
+    polys = panel(a, [Unit(40, 35, "A"), Unit(35, 10, "B")], 0, 100)
+    assert [c for c, _ in polys] == ["A", "B"] and all(len(v) == 4 for _, v in polys)
+
+
+def test_section_modes(tmp_path):
+    from litholog.section import along_line, save_section, through_boreholes
+
+    proj = _gms_project(tmp_path)
+    line = through_boreholes(proj, ["H1", "H2", "H3"], "A-A'")
+    assert [round(st.s) for st in line.stations] == [0, 283, 566]
+    assert save_section(proj, line, tmp_path / "a.pdf").stat().st_size > 10_000
+    near = along_line(proj, [(0, 200), (600, 200)], buffer=250, name="B-B'")
+    assert [st.id for st in near.stations] == ["H1", "H2", "H3"]
+    assert near.stations[1].offset != 0
+    assert save_section(proj, near, tmp_path / "b.png", page="A4", ve=10).exists()
+    with pytest.raises(ValueError):
+        along_line(proj, [(0, 5000), (600, 5000)], buffer=10)
+
+
+def test_fence_networks(tmp_path):
+    from litholog.fence import network_edges, save_fence
+
+    proj = _gms_project(tmp_path)
+    mst = network_edges(proj, method="mst")
+    assert len(mst) == 2  # spanning tree of 3 holes
+    assert len(network_edges(proj, method="delaunay", max_factor=10)) == 3
+    files = save_fence(proj, mst, tmp_path / "f.png", views=[-60, 30])
+    assert len(files) == 2 and all(f.exists() for f in files)
+
+
+def test_section_and_fence_cli(tmp_path):
+    proj_file = tmp_path / "b.txt"
+    proj_file.write_text(GMS + "H3\t500\t200\t40\t1\nH3\t500\t200\t-10\t5\n")
+    sec = tmp_path / "sections.csv"
+    sec.write_text("Section,Borehole ID\nA-A',H1\nA-A',H2\nB-B',H2\nB-B',H3\n")
+    assert main(["section", str(proj_file), "-s", str(sec), "-o", str(tmp_path / "s")]) == 0
+    assert (tmp_path / "s" / "all_sections.pdf").exists()
+    assert main(["section", str(proj_file), "-b", "H1", "H3", "-o", str(tmp_path / "s"), "-f", "png"]) == 0
+    assert main(["fence", str(proj_file), "-o", str(tmp_path / "f.pdf")]) == 0
+    assert main(["fence", str(proj_file), "--network", "sections", "-s", str(sec),
+                 "-o", str(tmp_path / "g.png")]) == 0

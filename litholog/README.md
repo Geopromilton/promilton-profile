@@ -2,8 +2,8 @@
 
 **Free, open-source borehole logging for geologists, hydrogeologists and geotechnical engineers.**
 
-Fill in one Excel sheet → get publication-quality borehole strip logs as PDF, PNG or SVG.
-Cross-sections, fence diagrams and 3D aquifer models are next on the roadmap.
+Fill in one Excel sheet (or point it at a GMS borehole file) → get publication-quality
+borehole strip logs, geological cross-sections and 3D fence diagrams as PDF, PNG or SVG.
 
 ![Example strip log](docs/BW-01.png)
 
@@ -50,12 +50,48 @@ litholog convert  boreholes_gms.txt my_site.xlsx --legend my_legend.csv
 # → editable workbook: add descriptions, well construction, water levels, then re-run striplog
 ```
 
+## Cross-sections
+
+```bash
+litholog section data.xlsx -b BH-01 BH-04 BH-07 -n "A-A'"         # line runs hole to hole
+litholog section data.xlsx --line 778000,943000 808000,925000 --buffer 1000 -n "B-B'"
+litholog section data.xlsx -s sections.csv                        # many sections at once
+```
+
+`sections.csv` lists `Section, Borehole ID` rows in order along each line (or `Section, X, Y`
+vertices, with an optional `Buffer` column); see `examples/sections_example.csv`.
+Holes near a `--line` are projected onto it and labelled with their offset.
+
+Layers are joined between neighbouring holes by aligning the two sequences, much like correlating
+by hand: the same unit at a similar level is joined, a unit found in only one hole pinches out
+half-way, and different units at the same level meet at a vertical boundary half-way between the
+holes. Each section has a location plan, legend, ground surface, water table (if measured) and a
+vertical exaggeration chosen to fill the page (`--ve 20` to fix it; `--page A4`).
+`--datum depth` hangs all holes from a flat ground surface instead of their elevations.
+
+![Cross-section](docs/section_demo.png)
+
+## Fence diagrams (3D)
+
+```bash
+litholog fence data.xlsx                              # minimum spanning tree: every hole, no crossings
+litholog fence data.xlsx --network delaunay           # denser triangulated network
+litholog fence data.xlsx --network sections -s sections.csv
+litholog fence data.xlsx --views 4 -o fence.pdf       # four views around the model
+```
+
+`--azim` / `--elev` set the viewing direction and `--ve` the vertical exaggeration.
+
+![Fence diagram](docs/fence_demo.png)
+
 ## Commands
 
 ```
 litholog template FILE.xlsx [--empty]        write the input workbook (with example rows)
 litholog validate DATA                       check for overlaps, gaps, bad depths, unknown codes
 litholog striplog DATA [-o DIR] [-f pdf|png|svg] [-b BH1 BH2] [-m 50] [--title NAME]
+litholog section DATA (-b IDS | --line X,Y ... | -s FILE) [--ve N] [--page A3|A4]
+litholog fence DATA [--network mst|delaunay|sections] [--views N] [-o fence.pdf]
 litholog convert DATA [OUT.xlsx] [-l LEGEND] turn GMS text / CSV folder into a workbook
 litholog legend [DATA] [-o legend.pdf]       list / draw the lithology legend
 
@@ -89,7 +125,7 @@ save_striplog(bh, project.legend, "BW-01.pdf")
 ## Roadmap
 
 - [x] **M1** Borehole database (Excel/CSV/GMS), validation, strip logs, custom legends
-- [ ] **M2** Cross-sections along any line, 2D/3D fence diagrams
+- [x] **M2** Cross-sections (hole-to-hole or along any line), 3D fence diagrams
 - [ ] **M3** Layer-surface models, isopach and water-table maps, 3D lithology block models, volumes
 - [ ] **M4** Browser app (no install), 3D viewer, report export, KMZ/VTK/DXF export
 

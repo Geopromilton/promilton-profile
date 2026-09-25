@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.colors import to_rgb
-from matplotlib.patches import Rectangle
+from matplotlib.patches import Polygon, Rectangle
 
 
 @dataclass(frozen=True)
@@ -133,17 +133,17 @@ def mm_per_data(ax) -> tuple[float, float]:
     return abs(x1 - x0) / w_mm, abs(y1 - y0) / h_mm
 
 
-def draw_interval(ax, x0, x1, y0, y1, lith: LithType, edge=True, lw=0.45):
+def draw_interval(ax, x0, x1, y0, y1, lith: LithType, edge=True, lw=0.45, z=0.0):
     """Fill a rectangle (data coords) with a lithology's colour and pattern."""
     rect = Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor=lith.color,
-                     edgecolor="none", zorder=1)
+                     edgecolor="none", zorder=1 + z)
     ax.add_patch(rect)
     color = line_color_for(lith.color)
     for name in str(lith.pattern).split("+"):
-        _draw_pattern(ax, x0, x1, y0, y1, name.strip().lower(), color, lw)
+        _draw_pattern(ax, x0, x1, y0, y1, name.strip().lower(), color, lw, z=z)
     if edge:
         ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor="none",
-                               edgecolor="#222222", lw=0.6, zorder=4))
+                               edgecolor="#222222", lw=0.6, zorder=4 + z))
 
 
 def _grid(lo, hi, step):
@@ -151,9 +151,24 @@ def _grid(lo, hi, step):
     return np.arange(np.floor(lo / step) - 1, np.ceil(hi / step) + 2)
 
 
-def _draw_pattern(ax, x0, x1, y0, y1, name, color, lw):
+def draw_polygon(ax, verts, lith: LithType, edge=True, lw=0.45, edge_lw=0.5):
+    """Fill any polygon (data coords) with a lithology's colour and clipped pattern."""
+    verts = np.asarray(verts, float)
+    ax.add_patch(Polygon(verts, closed=True, facecolor=lith.color, edgecolor="none", zorder=1))
+    clip = Polygon(verts, closed=True, transform=ax.transData)
+    (x0, y0), (x1, y1) = verts.min(0), verts.max(0)
+    color = line_color_for(lith.color)
+    for name in str(lith.pattern).split("+"):
+        _draw_pattern(ax, x0, x1, y0, y1, name.strip().lower(), color, lw, clip)
+    if edge:
+        ax.add_patch(Polygon(verts, closed=True, facecolor="none", edgecolor="#333333",
+                             lw=edge_lw, zorder=4))
+
+
+def _draw_pattern(ax, x0, x1, y0, y1, name, color, lw, clip=None, z=0.0):
     if name in ("", "blank", "none"):
         return
+    clip = clip if clip is not None else _clip_rect(ax, x0, x1, y0, y1)
     ux, uy = mm_per_data(ax)  # data units per mm
     X0, X1 = sorted((x0 / ux, x1 / ux))
     Y0, Y1 = sorted((y0 / uy, y1 / uy))
@@ -181,7 +196,7 @@ def _draw_pattern(ax, x0, x1, y0, y1, name, color, lw):
     elif name == "bands":
         for k in _grid(Y0, Y1, 1.5):
             w = 1.8 if int(k) % 2 else 0.5
-            _clipped([[(X0 - 1, k * 1.5), (X1 + 1, k * 1.5)]], ax, x0, x1, y0, y1, ux, uy, color, w)
+            _clipped([[(X0 - 1, k * 1.5), (X1 + 1, k * 1.5)]], ax, clip, ux, uy, color, w, z)
     elif name in ("diag", "backdiag"):
         sign = 1 if name == "diag" else -1
         # lines y = sign*x + c; c spans the rectangle's corners
@@ -225,15 +240,14 @@ def _draw_pattern(ax, x0, x1, y0, y1, name, color, lw):
         return  # unknown pattern name: plain colour fill
 
     if segs:
-        _clipped(segs, ax, x0, x1, y0, y1, ux, uy, color, lw)
+        _clipped(segs, ax, clip, ux, uy, color, lw, z)
     if pts:
-        clip = _clip_rect(ax, x0, x1, y0, y1)
         arr = np.array([(p[0] * ux, p[1] * uy) for p in pts])
         filled = pts[0][3]
         sc = ax.scatter(arr[:, 0], arr[:, 1], s=pts[0][2],
                         facecolors=color if filled else "none",
                         edgecolors="none" if filled else color,
-                        linewidths=lw, zorder=2)
+                        linewidths=lw, zorder=2 + z)
         sc.set_clip_path(clip)
 
 
@@ -247,10 +261,10 @@ def _clip_rect(ax, x0, x1, y0, y1):
                      transform=ax.transData)
 
 
-def _clipped(segs_mm, ax, x0, x1, y0, y1, ux, uy, color, lw):
+def _clipped(segs_mm, ax, clip, ux, uy, color, lw, z=0.0):
     segs = [[(x * ux, y * uy) for x, y in s] for s in segs_mm]
-    coll = LineCollection(segs, colors=color, linewidths=lw, zorder=2)
+    coll = LineCollection(segs, colors=color, linewidths=lw, zorder=2 + z)
     # Clip after adding: add_collection() would otherwise replace a rectangular clip.
     ax.add_collection(coll, autolim=False)
-    coll.set_clip_path(_clip_rect(ax, x0, x1, y0, y1))
+    coll.set_clip_path(clip)
     return coll
