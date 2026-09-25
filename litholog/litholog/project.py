@@ -16,6 +16,7 @@ TABLE_COLUMNS = {
     "construction": ["borehole_id", "from", "to", "element", "diameter", "material"],
     "water_levels": ["borehole_id", "date", "depth"],
     "downhole": ["borehole_id", "depth", "parameter", "value", "unit"],
+    "fractures": ["borehole_id", "depth", "dip", "dip_direction", "aperture", "yield", "remarks"],
 }
 
 
@@ -35,6 +36,7 @@ class Borehole:
     construction: pd.DataFrame = field(default_factory=lambda: empty_table("construction"))
     water_levels: pd.DataFrame = field(default_factory=lambda: empty_table("water_levels"))
     downhole: pd.DataFrame = field(default_factory=lambda: empty_table("downhole"))
+    fractures: pd.DataFrame = field(default_factory=lambda: empty_table("fractures"))
 
     @property
     def has_elevation(self) -> bool:
@@ -61,6 +63,7 @@ class Project:
     construction: pd.DataFrame
     water_levels: pd.DataFrame
     downhole: pd.DataFrame
+    fractures: pd.DataFrame = field(default_factory=lambda: empty_table("fractures"))
     legend: Legend = field(default_factory=Legend)
     name: str = "LithoLog project"
 
@@ -90,6 +93,7 @@ class Project:
             construction=sub(self.construction, "from"),
             water_levels=sub(self.water_levels, "date"),
             downhole=sub(self.downhole, ["parameter", "depth"]),
+            fractures=sub(self.fractures, "depth"),
         )
 
     def __iter__(self):

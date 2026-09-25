@@ -113,6 +113,25 @@ for bid, steps in {"BW-01": [(17, 0.8), (53, 3.3)], "BW-03": [(20, 0.6), (65, 3.
         rows.append((bid, d, "Yield", round(q, 2), "lps"))
 downhole = pd.DataFrame(rows, columns=["Borehole ID", "Depth (m)", "Parameter", "Value", "Unit"])
 
+# Fractures: steep NE-SW joint set, gentle sheet joints, water strikes in fractured zones.
+fr = []
+for bid in ["BW-01", "BW-02", "BW-03", "BW-04", "BW-05"]:
+    sub = lithology[lithology["Borehole ID"] == bid]
+    for _, r in sub.iterrows():
+        if r["Code"] in ("FGRA", "FGN", "DOL", "QTZ", "WGRA", "WGN"):
+            n = max(2, int((r["To (m)"] - r["From (m)"]) / 1.5))
+            for d in np.linspace(r["From (m)"] + 0.3, r["To (m)"] - 0.3, n):
+                if rng.random() < 0.6:
+                    dip, ddir = rng.normal(72, 8), rng.normal(135, 12)
+                else:
+                    dip, ddir = abs(rng.normal(12, 6)), rng.normal(200, 40)
+                strike = r["Code"].startswith("F") and rng.random() < 0.25
+                fr.append((bid, round(d, 1), round(min(dip, 89), 0), round(ddir % 360, 0),
+                           round(rng.uniform(0.5, 5), 1), round(rng.uniform(0.3, 2.5), 1) if strike else None,
+                           "Water strike" if strike else "Joint"))
+fractures = pd.DataFrame(fr, columns=["Borehole ID", "Depth (m)", "Dip (deg)", "Dip direction (deg)",
+                                      "Aperture (mm)", "Yield (lps)", "Remarks"])
+
 out = HERE / "sample_project.xlsx"
 with pd.ExcelWriter(out, engine="openpyxl") as xw:
     pd.DataFrame({"Note": ["SYNTHETIC demonstration data - not real boreholes."]}).to_excel(
@@ -122,4 +141,5 @@ with pd.ExcelWriter(out, engine="openpyxl") as xw:
     construction.to_excel(xw, sheet_name="Construction", index=False)
     wl.to_excel(xw, sheet_name="WaterLevels", index=False)
     downhole.to_excel(xw, sheet_name="Downhole", index=False)
+    fractures.to_excel(xw, sheet_name="Fractures", index=False)
 print("wrote", out)

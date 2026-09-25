@@ -140,10 +140,14 @@ def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
     widths.append(("lith", s.lith_w))
     show_well = len(bh.construction) > 0 or len(bh.water_levels.dropna(subset=["depth"])) > 0
     well_w = s.well_w if show_well else 0.0
-    fixed = sum(w for _, w in widths) + well_w + len(params) * s.curve_w
+    fr = bh.fractures.dropna(subset=["depth", "dip"]) if hasattr(bh, "fractures") else None
+    show_fr = fr is not None and len(fr) > 0
+    fixed = sum(w for _, w in widths) + well_w + len(params) * s.curve_w + (s.curve_w if show_fr else 0)
     widths.append(("desc", usable - fixed))
     if show_well:
         widths.append(("well", well_w))
+    if show_fr:
+        widths.append(("fract", s.curve_w))
     widths += [(f"curve:{p}", s.curve_w) for p in params]
 
     y_title = s.margin + s.header_h + 2
@@ -165,7 +169,7 @@ def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
     step = _nice_step(bottom - top, 12)
     ticks = np.arange(math.ceil(top / step) * step, bottom + 1e-9, step)
     for key, ax in axes.items():
-        ax.add_patch(Rectangle((ax.get_xlim()[0], top), np.diff(ax.get_xlim())[0], bottom - top,
+        ax.add_patch(Rectangle((0, 0), 1, 1, transform=ax.transAxes,  # border, independent of track scale
                                facecolor="none", edgecolor=INK, lw=0.6, zorder=6))
         if key not in ("depth", "elev", "lith"):
             for t in ticks:
@@ -181,6 +185,8 @@ def _draw_page(bh, legend, s: Style, top, bottom, page_no, n_pages):
         _well_track(axes["well"], bh, top, bottom)
     for i, p in enumerate(params):
         _curve_track(axes[f"curve:{p}"], bh, p, CURVE_COLORS[i % len(CURVE_COLORS)])
+    if "fract" in axes:
+        _fracture_track(axes["fract"], fr, top, bottom)
 
     _legend(pg, bh, legend, s, y_body + body_h + 3)
     scale = (bottom - top) * 1000 / body_h
@@ -243,10 +249,36 @@ def _clip(text, n):
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+def _fracture_track(ax, fr, top, bottom):
+    """Tadpole plot: dot at the dip (x, 0–90°) and depth; tail points in the dip direction
+    (map view: north up). Water strikes are blue with their yield."""
+    ax.set_xlim(-8, 98)
+    for x in (0, 30, 60, 90):
+        ax.axvline(x, color=GRID, lw=0.3, zorder=0)
+    span = bottom - top
+    ymm = span / max(ax.get_position().height * ax.figure.get_figheight() * 25.4, 1)  # m per mm
+    xmm = 106 / max(ax.get_position().width * ax.figure.get_figwidth() * 25.4, 1)    # x-units per mm
+    for _, r in fr.iterrows():
+        d = r["depth"]
+        if not top <= d <= bottom:
+            continue
+        water = pd.notna(r.get("yield")) and r.get("yield", 0) > 0
+        col = WATER if water else INK
+        ax.scatter([r["dip"]], [d], s=9 if water else 6, color=col, zorder=4, lw=0)
+        if pd.notna(r.get("dip_direction")):
+            a = np.radians(r["dip_direction"])
+            ax.plot([r["dip"], r["dip"] + 2.6 * xmm * np.sin(a)], [d, d - 2.6 * ymm * np.cos(a)],
+                    color=col, lw=0.7, zorder=4)
+        if water:
+            ax.text(96, d, f"{r['yield']:g}", fontsize=4.5, color=WATER, ha="right", va="center")
+    for x in (0, 30, 60, 90):
+        ax.text(x, bottom, f"{x}", fontsize=4.5, ha="center", va="bottom", color="#777777")
+
+
 def _track_title(ax, key, bh, s):
     h = s.title_h
     titles = {"depth": "Depth\n(m bgl)", "elev": "Elev.\n(m amsl)", "lith": "Lithology",
-              "desc": "Description", "well": "Well\nconstruction"}
+              "desc": "Description", "well": "Well\nconstruction", "fract": "Fractures\n(dip 0–90°)"}
     if key.startswith("curve:"):
         p = key.split(":", 1)[1]
         unit = bh.downhole.loc[bh.downhole["parameter"].astype(str) == p, "unit"].dropna()

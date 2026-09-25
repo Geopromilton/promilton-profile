@@ -114,8 +114,13 @@ def contact_edges(polys, tol=1e-6):
 
 def section_figure(project: Project, line: SectionLine, legend: Legend | None = None,
                    ve: float | None = None, page: str = "A3", title: str = "",
-                   datum: str = "elevation", scale: float = 25.0):
+                   datum: str = "elevation", scale: float = 25.0, style: str = "section",
+                   curve: str | None = None):
+    """Correlated cross-section. ``style="logs"`` draws a log section: wider
+    lithology columns with depth ticks, an optional downhole ``curve`` track
+    beside each hole, and the correlation panels faded behind."""
     legend = legend or project.legend
+    logs = style == "logs"
     W, H = PAGES.get(page.upper(), PAGES["A3"])
     fig = plt.figure(figsize=(W / 25.4, H / 25.4))
     m = 12.0
@@ -130,7 +135,7 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
     tax = axes_mm(m, m, W - 2 * m, title_h)
     tax.set_xlim(0, W - 2 * m), tax.set_ylim(title_h, 0), tax.set_axis_off()
     tax.add_patch(Rectangle((0, 0), W - 2 * m, title_h, facecolor=ACCENT))
-    tax.text(4, title_h / 2, "GEOLOGICAL CROSS-SECTION", color="white", fontsize=10,
+    tax.text(4, title_h / 2, "LOG SECTION" if logs else "GEOLOGICAL CROSS-SECTION", color="white", fontsize=10,
              fontweight="bold", va="center")
     tax.text((W - 2 * m) / 2, title_h / 2, line.name, color="white", fontsize=14,
              fontweight="bold", va="center", ha="center")
@@ -151,7 +156,7 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
     s0, s1 = 0.0, max(line.length, line.stations[-1].s)
     pad_s = 0.03 * (s1 - s0 or 1)
     pad_z = 0.06 * (zmax - zmin or 1)
-    xlim = [s0 - pad_s, s1 + pad_s]
+    xlim = [s0 - pad_s, s1 + pad_s * (3.5 if logs and curve else 1)]  # room for the last curve track
     ylim = [zmin - pad_z, zmax + 2.2 * pad_z]
     # Vertical exaggeration: page mm per metre vertical / horizontal.
     natural = (bh_ / (ylim[1] - ylim[0])) / (bw / (xlim[1] - xlim[0]))
@@ -174,7 +179,10 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
         for code, verts in polys:
             draw_polygon(ax, verts, legend.get(code), edge=False, lw=0.4)
         for p, q in contact_edges(polys):
-            ax.plot([p[0], q[0]], [p[1], q[1]], color="#333333", lw=0.5, zorder=4)
+            ax.plot([p[0], q[0]], [p[1], q[1]], color="#333333", lw=0.35 if logs else 0.5, zorder=4)
+    if logs:  # fade the interpretation so the logs (data) stand out
+        ax.add_patch(Rectangle((xlim[0], ylim[0]), xlim[1] - xlim[0], ylim[1] - ylim[0], facecolor="white",
+                               edgecolor="none", alpha=0.55, zorder=4.5))
 
     # Ground surface through collars, blank sky above
     tops = [(st.s, us[0].top) for (st, _), us in zip(holes, unit_sets) if us]
@@ -187,7 +195,7 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
 
     # Borehole columns
     ux = (xlim[1] - xlim[0]) / bw  # metres per mm horizontally
-    half = 1.6 * ux
+    half = (3.0 if logs else 1.6) * ux
     for (st, bh), us in zip(holes, unit_sets):
         if us:  # white halo so the hole column stands out from the panels
             ax.add_patch(Rectangle((st.s - 1.6 * half, us[-1].bot), 3.2 * half, us[0].top - us[-1].bot,
@@ -207,6 +215,8 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
         if len(wl) and us:
             z = (bh.elevation if (datum == "elevation" and bh.has_elevation) else 0) - wl.iloc[-1]["depth"]
             ax.plot([st.s - 2.5 * half, st.s + 2.5 * half], [z, z], color=WATER, lw=1.0, zorder=8)
+    if logs:
+        _log_tracks(ax, holes, unit_sets, datum, half, ux, ylim, curve)
     wl_pts = []
     for (st, bh), us in zip(holes, unit_sets):
         wl = bh.water_levels.dropna(subset=["depth"])
@@ -246,6 +256,56 @@ def section_figure(project: Project, line: SectionLine, legend: Legend | None = 
                      "(units joined by sequence and elevation; unmatched units pinch out half-way)",
              fontsize=6, color="#777777", va="center")
     return fig
+
+
+def _log_tracks(ax, holes, unit_sets, datum, half, ux, ylim, curve):
+    """Depth ticks on each log column and an optional downhole curve track beside it."""
+    from .maps import nice_levels
+
+    span = ylim[1] - ylim[0]
+    tw = 13 * ux  # curve track width
+    allv = None
+    if curve:
+        dh = pd.concat([bh.downhole for _, bh in holes])
+        dh = dh[dh["parameter"].astype(str) == curve].dropna(subset=["depth", "value"])
+        allv = dh["value"].to_numpy(float) if len(dh) else None
+    logscale = allv is not None and len(allv) and allv.min() > 0 and allv.max() / allv.min() > 50
+    if allv is not None and len(allv):
+        lo, hi = (np.log10(allv.min()), np.log10(allv.max())) if logscale else (allv.min(), allv.max())
+        hi = hi if hi > lo else lo + 1
+    for (st, bh), us in zip(holes, unit_sets):
+        if not us:
+            continue
+        top = us[0].top
+        depth = top - us[-1].bot
+        step = nice_levels(0, depth, 6)
+        step = step[1] - step[0] if len(step) > 1 else depth
+        for d in np.arange(0, depth + 1e-9, step):
+            z = top - d
+            ax.plot([st.s - half - 0.8 * ux, st.s - half], [z, z], color=INK, lw=0.5, zorder=9)
+            ax.text(st.s - half - 1.1 * ux, z, f"{d:g}", fontsize=4.5, ha="right", va="center", zorder=9,
+                    color="#333333")
+        if allv is None or not len(allv):
+            continue
+        d = bh.downhole
+        d = d[d["parameter"].astype(str) == curve].dropna(subset=["depth", "value"]).sort_values("depth")
+        x0 = st.s + half + 1.0 * ux
+        ax.add_patch(Rectangle((x0, us[-1].bot), tw, top - us[-1].bot, facecolor="white", edgecolor="#888888",
+                               lw=0.5, zorder=8))
+        for f in (0.25, 0.5, 0.75):
+            ax.plot([x0 + f * tw] * 2, [us[-1].bot, top], color="#E3E3E3", lw=0.3, zorder=8.2)
+        if len(d):
+            v = np.log10(d["value"].to_numpy(float)) if logscale else d["value"].to_numpy(float)
+            xs = x0 + (v - lo) / (hi - lo) * tw
+            zs = (bh.elevation if (datum == "elevation" and bh.has_elevation) else 0) - d["depth"].to_numpy()
+            ax.plot(xs, zs, color="#B8433A", lw=0.8, zorder=9)
+        ax.text(x0 + tw / 2, top + span * 0.006, curve, fontsize=4.5, ha="center", va="bottom", color="#B8433A",
+                zorder=9)
+    if allv is not None and len(allv):
+        fmt = (lambda v: f"{10 ** v:.3g}") if logscale else (lambda v: f"{v:.3g}")
+        ax.text(0.01, 0.015, f"{curve} track: {fmt(lo)} – {fmt(hi)}" + (" (log scale)" if logscale else ""),
+                transform=ax.transAxes, fontsize=6.5, color="#B8433A", zorder=10,
+                bbox=dict(facecolor="white", edgecolor="none", pad=1.5, alpha=0.9))
 
 
 def _nice_ve(v):

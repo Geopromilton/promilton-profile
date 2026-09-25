@@ -21,6 +21,7 @@ SHEET_ALIASES = {
     "construction": ["construction", "well_construction", "casing", "completion"],
     "water_levels": ["water_levels", "water_level", "waterlevels", "wl", "swl"],
     "downhole": ["downhole", "downhole_data", "geophysics", "logs", "measurements"],
+    "fractures": ["fractures", "fracture", "joints", "structures", "structural", "discontinuities"],
     "legend": ["legend", "lithology_legend", "codes", "lithology_codes"],
 }
 
@@ -61,12 +62,23 @@ COLUMN_ALIASES = {
     },
 }
 
+COLUMN_ALIASES["fractures"] = {
+    "borehole_id": ["borehole_id", "borehole", "bh_id", "bh", "well_id", "well", "id", "hole_id"],
+    "depth": ["depth", "md", "depth_m"],
+    "dip": ["dip", "dip_angle", "inclination"],
+    "dip_direction": ["dip_direction", "dip_dir", "dipdir", "azimuth", "dip_azimuth", "direction"],
+    "aperture": ["aperture", "opening", "width"],
+    "yield": ["yield", "discharge", "water_strike", "flow"],
+    "remarks": ["remarks", "type", "description", "comment"],
+}
+
 NUMERIC = {
     "boreholes": ["x", "y", "elevation", "total_depth"],
     "lithology": ["from", "to"],
     "construction": ["from", "to", "diameter"],
     "water_levels": ["depth"],
     "downhole": ["depth", "value"],
+    "fractures": ["depth", "dip", "dip_direction", "aperture", "yield"],
 }
 
 
@@ -252,9 +264,12 @@ def write_project(project: Project, path) -> Path:
         "water_levels": {"borehole_id": "Borehole ID", "date": "Date", "depth": "Depth to water (m bgl)"},
         "downhole": {"borehole_id": "Borehole ID", "depth": "Depth (m)", "parameter": "Parameter",
                      "value": "Value", "unit": "Unit"},
+        "fractures": {"borehole_id": "Borehole ID", "depth": "Depth (m)", "dip": "Dip (deg)",
+                      "dip_direction": "Dip direction (deg)", "aperture": "Aperture (mm)",
+                      "yield": "Yield (lps)", "remarks": "Remarks"},
     }
     sheet = {"boreholes": "Boreholes", "lithology": "Lithology", "construction": "Construction",
-             "water_levels": "WaterLevels", "downhole": "Downhole"}
+             "water_levels": "WaterLevels", "downhole": "Downhole", "fractures": "Fractures"}
     used = set(project.lithology["code"])
     legend = pd.DataFrame([{"Code": t.code, "Name": t.name, "Color": t.color, "Pattern": t.pattern,
                             "Group": t.group} for t in project.legend if t.code in used]
@@ -333,6 +348,8 @@ _INSTRUCTIONS = [
     ("WaterLevels", "Optional. Depth to water in m below ground level, with date."),
     ("Downhole", "Optional. Long format: one row per reading (Depth, Parameter, Value, Unit), "
                  "e.g. resistivity, gamma, EC, yield."),
+    ("Fractures", "Optional. Depth, dip (0-90 deg), dip direction (0-360 deg), aperture, yield of "
+                  "water strikes. Drawn on strip logs; rose diagrams and stereonets."),
     ("Legend", "Code, Name, Color (hex like #F3E196), Pattern. Patterns can be combined with '+', "
                "e.g. crosses+fractures. Available patterns: " + ", ".join(PATTERNS)),
     ("", ""),
@@ -368,6 +385,11 @@ _EXAMPLE = {
         ("BH-02", "2025-03-15", 9.8),
     ], columns=["Borehole ID", "Date", "Depth to water (m bgl)"]),
     "Downhole": pd.DataFrame(columns=["Borehole ID", "Depth (m)", "Parameter", "Value", "Unit"]),
+    "Fractures": pd.DataFrame([
+        ("BH-01", 12.0, 35, 120, 2, 0.8, "Open joint, water strike"),
+        ("BH-01", 13.5, 70, 300, 1, None, "Iron-stained joint"),
+    ], columns=["Borehole ID", "Depth (m)", "Dip (deg)", "Dip direction (deg)", "Aperture (mm)",
+                "Yield (lps)", "Remarks"]),
 }
 
 
