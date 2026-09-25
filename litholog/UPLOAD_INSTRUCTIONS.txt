@@ -1,0 +1,15 @@
+LithoLog repository - how to upload (GitHub website)
+
+1. Unzip this file. Open github.com/Geopromilton/litholog
+2. Add file > Upload files. Drag in everything inside the unzipped folder
+   (folders docs, examples, litholog, packaging, tests and the files).
+   Existing files are replaced by the new versions. Commit changes.
+3. Files starting with a dot are skipped by the website. Create them with
+   Add file > Create new file:
+     .gitignore                         -> copy text from  packaging/gitignore.txt
+     .github/workflows/tests.yml        -> copy text from  packaging/tests-workflow.yml
+     .github/workflows/windows-build.yml-> copy text from  packaging/windows-build.yml
+4. After step 3, the Actions tab builds the Windows installer
+   (LithoLogStudio-Windows, under Artifacts) on every change to main.
+
+You can delete this instructions file afterwards.
